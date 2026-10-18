@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rotating Segmented Ring</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.1, 200);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000);
+document.body.appendChild(renderer.domElement);
+
+/* ---- Camera: looking down at an angle + slight roll ---- */
+const ELEVATION = 42 * Math.PI / 180;
+const ROLL = 0.55;
+function placeCamera() {
+  const aspect = innerWidth / innerHeight;
+  const dist = 15.5 * Math.max(1, 1 / aspect);
+  camera.position.set(0, Math.sin(ELEVATION) * dist, Math.cos(ELEVATION) * dist);
+  camera.up.set(Math.sin(ROLL), Math.cos(ROLL), 0);
+  camera.lookAt(0, 0, 0);
+  camera.aspect = aspect;
+  camera.updateProjectionMatrix();
+}
+placeCamera();
+
+/* ---- Ring: flat in XZ plane, spins around Y ---- */
+const ring = new THREE.Group();
+scene.add(ring);
+
+const SEGMENTS = 14;          // fewer, uniform blocks
+const R_IN = 1.7, R_OUT = 3.2;
+const HALF_H = 0.55;          // thick blocks
+const GAP = 0.05;
+const DOTS_PER_BLOCK = 320;   // fewer particles
+const GLOW_PER_BLOCK = 14;    // a few moderately glowing ones
+const ARC_STEPS = 6;
+
+const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85 });
+const P = (r, a, y) => new THREE.Vector3(Math.cos(a) * r, y, Math.sin(a) * r);
+
+function arc(r, a0, a1, y, out) {
+  for (let i = 0; i < ARC_STEPS; i++) {
+    const t0 = a0 + (a1 - a0) * (i / ARC_STEPS);
+    const t1 = a0 + (a1 - a0) * ((i + 1) / ARC_STEPS);
+    out.push(P(r, t0, y), P(r, t1, y));
+  }
+}
+
+// random dots with non-uniform brightness (vertex colors)
+function dots(r0, r1, a0, a1, h, n, size, minB, maxB, power) {
+  const pos = new Float32Array(n * 3), col = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const r = Math.sqrt(r0 * r0 + Math.random() * (r1 * r1 - r0 * r0));
+    const a = a0 + Math.random() * (a1 - a0);
+    const y = (Math.random() * 2 - 1) * h;
+    pos[i*3] = Math.cos(a) * r; pos[i*3+1] = y; pos[i*3+2] = Math.sin(a) * r;
+    const b = minB + Math.pow(Math.random(), power) * (maxB - minB);
+    col[i*3] = col[i*3+1] = col[i*3+2] = b;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  ring.add(new THREE.Points(g, new THREE.PointsMaterial({
+    size, sizeAttenuation: false, vertexColors: true
+  })));
+}
+
+function addBlock(a0, a1) {
+  const r0 = R_IN, r1 = R_OUT, h = HALF_H, v = [];
+  [-h, h].forEach(y => { arc(r0, a0, a1, y, v); arc(r1, a0, a1, y, v); });
+  [a0, a1].forEach(a => [-h, h].forEach(y => v.push(P(r0, a, y), P(r1, a, y))));
+  [r0, r1].forEach(r => [a0, a1].forEach(a => v.push(P(r, a, -h), P(r, a, h))));
+  ring.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(v), lineMat));
+
+  // many tiny, mostly faint dots (a few brighter)
+  dots(r0, r1, a0, a1, h, DOTS_PER_BLOCK, 1.0, 0.15, 1.0, 2.2);
+  // a few slightly larger, moderately glowing dots
+  dots(r0, r1, a0, a1, h, GLOW_PER_BLOCK, 2.0, 0.45, 0.8, 1.0);
+}
+
+const step = (Math.PI * 2) / SEGMENTS;
+for (let i = 0; i < SEGMENTS; i++) {
+  addBlock(i * step + GAP, (i + 1) * step - GAP);   // identical blocks
+}
+
+let spinning = true;
+addEventListener('click', () => spinning = !spinning);
+addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); placeCamera(); });
+
+function animate() {
+  requestAnimationFrame(animate);
+  if (spinning) ring.rotation.y += 0.004;
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
