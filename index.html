@@ -6,14 +6,14 @@
 <title>Rotating Segmented Ring</title>
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
-  canvas { display: block; }
+  canvas { display: block; touch-action: none; cursor: grab; }
 </style>
 </head>
 <body>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.1, 200);
+const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.1, 300);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -21,12 +21,13 @@ renderer.setSize(innerWidth, innerHeight);
 renderer.setClearColor(0x000000);
 document.body.appendChild(renderer.domElement);
 
-/* ---- Camera: looking down at an angle + slight roll ---- */
+/* ---------- Camera: angled view + slight roll ---------- */
 const ELEVATION = 42 * Math.PI / 180;
 const ROLL = 0.55;
-function placeCamera() {
+let zoom = 1, zoomTarget = 1;
+function placeCamera(extra = 1) {
   const aspect = innerWidth / innerHeight;
-  const dist = 15.5 * Math.max(1, 1 / aspect);
+  const dist = 15.5 * Math.max(1, 1 / aspect) * zoom * extra;
   camera.position.set(0, Math.sin(ELEVATION) * dist, Math.cos(ELEVATION) * dist);
   camera.up.set(Math.sin(ROLL), Math.cos(ROLL), 0);
   camera.lookAt(0, 0, 0);
@@ -35,19 +36,86 @@ function placeCamera() {
 }
 placeCamera();
 
-/* ---- Ring: flat in XZ plane, spins around Y ---- */
+/* ---------- Scene graph: pivot (drag) > ring (auto spin) ---------- */
+const pivot = new THREE.Group();
 const ring = new THREE.Group();
-scene.add(ring);
+pivot.add(ring);
+scene.add(pivot);
 
-const SEGMENTS = 14;          // fewer, uniform blocks
+const SEGMENTS = 14;
 const R_IN = 1.7, R_OUT = 3.2;
-const HALF_H = 0.55;          // thick blocks
+const HALF_H = 0.55;
 const GAP = 0.05;
-const DOTS_PER_BLOCK = 320;   // fewer particles
-const GLOW_PER_BLOCK = 14;    // a few moderately glowing ones
+const DOTS_PER_BLOCK = 620;
+const GLOW_PER_BLOCK = 26;
 const ARC_STEPS = 6;
+const STEP = (Math.PI * 2) / SEGMENTS;
 
-const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85 });
+/* ---------- Shared uniforms (depth fade + intro fade) ---------- */
+const shared = {
+  uNear: { value: 10 }, uFar: { value: 20 },
+  uFade: { value: 0 },
+  uPR:   { value: renderer.getPixelRatio() },
+  uRes:  { value: new THREE.Vector2(innerWidth * renderer.getPixelRatio(), innerHeight * renderer.getPixelRatio()) },
+  uWidth:{ value: 2.4 * renderer.getPixelRatio() }     // border thickness in pixels
+};
+function lineMaterial(hiU, tintU) {
+  return new THREE.ShaderMaterial({
+    uniforms: Object.assign({ uHi: hiU, uTint: tintU }, shared), transparent: true, depthWrite: false,
+    side: THREE.DoubleSide,
+    // thick lines: each edge is a screen-space quad of uWidth pixels
+    vertexShader: `
+      attribute vec3 aOther; attribute float aSide, aEnd;
+      uniform float uNear, uFar, uWidth; uniform vec2 uRes; varying float vF;
+      void main(){
+        vec4 mvA = modelViewMatrix * vec4(position, 1.0);
+        vec4 mvB = modelViewMatrix * vec4(aOther, 1.0);
+        vec4 cA = projectionMatrix * mvA, cB = projectionMatrix * mvB;
+        vec4 cur = aEnd < 0.5 ? cA : cB;
+        float z = aEnd < 0.5 ? -mvA.z : -mvB.z;
+        vec2 sA = cA.xy / cA.w * uRes * 0.5, sB = cB.xy / cB.w * uRes * 0.5;
+        vec2 dir = normalize(sB - sA + vec2(1e-5));
+        vec2 nrm = vec2(-dir.y, dir.x);
+        vec2 off = (nrm * aSide + dir * (aEnd < 0.5 ? -1.0 : 1.0)) * uWidth * 0.5;
+        vec4 p = cur;
+        p.xy += off / (uRes * 0.5) * cur.w;
+        vF = 1.0 - smoothstep(uNear, uFar, z);
+        gl_Position = p;
+      }`,
+    fragmentShader: `
+      uniform float uFade, uHi; uniform vec3 uTint; varying float vF;
+      void main(){
+        float a = (0.18 + 0.67 * vF + 0.6 * uHi) * uFade;
+        gl_FragColor = vec4(mix(vec3(1.0), uTint, uHi), min(a, 1.0));
+      }`
+  });
+}
+
+function pointMaterial(size, hiU, tintU) {
+  return new THREE.ShaderMaterial({
+    uniforms: Object.assign({ uSize: { value: size }, uHi: hiU, uTint: tintU }, shared),
+    transparent: true, depthWrite: false,
+    vertexShader: `
+      uniform float uNear, uFar, uSize, uPR, uHi;
+      attribute float aB; varying float vB;
+      void main(){
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        float f = 1.0 - smoothstep(uNear, uFar, -mv.z);
+        vB = aB * (0.2 + 0.8 * f) + uHi * 0.55;
+        gl_PointSize = uSize * uPR * (0.75 + 0.25 * f) * (1.0 + 0.7 * uHi);
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: `
+      uniform float uFade, uHi; uniform vec3 uTint; varying float vB;
+      void main(){
+        float d = length(gl_PointCoord - 0.5);
+        if (d > 0.5) discard;
+        gl_FragColor = vec4(mix(vec3(1.0), uTint, uHi),
+                            min(vB, 1.0) * uFade * smoothstep(0.5, 0.15, d));
+      }`
+  });
+}
+
 const P = (r, a, y) => new THREE.Vector3(Math.cos(a) * r, y, Math.sin(a) * r);
 
 function arc(r, a0, a1, y, out) {
@@ -58,50 +126,218 @@ function arc(r, a0, a1, y, out) {
   }
 }
 
-// random dots with non-uniform brightness (vertex colors)
-function dots(r0, r1, a0, a1, h, n, size, minB, maxB, power) {
-  const pos = new Float32Array(n * 3), col = new Float32Array(n * 3);
+function dots(r0, r1, a0, a1, h, n, mat, minB, maxB, power) {
+  const pos = new Float32Array(n * 3), br = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     const r = Math.sqrt(r0 * r0 + Math.random() * (r1 * r1 - r0 * r0));
     const a = a0 + Math.random() * (a1 - a0);
     const y = (Math.random() * 2 - 1) * h;
     pos[i*3] = Math.cos(a) * r; pos[i*3+1] = y; pos[i*3+2] = Math.sin(a) * r;
-    const b = minB + Math.pow(Math.random(), power) * (maxB - minB);
-    col[i*3] = col[i*3+1] = col[i*3+2] = b;
+    br[i] = minB + Math.pow(Math.random(), power) * (maxB - minB);
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  ring.add(new THREE.Points(g, new THREE.PointsMaterial({
-    size, sizeAttenuation: false, vertexColors: true
-  })));
+  g.setAttribute('aB', new THREE.BufferAttribute(br, 1));
+  const pts = new THREE.Points(g, mat);
+  pts.frustumCulled = false;
+  ring.add(pts);
 }
 
-function addBlock(a0, a1) {
+const blocks = [];   // per-block highlight state
+
+function addBlock(a0, a1, index) {
+  const hiU = { value: 0 };
+  // each block gets its own distinct color (hue spread around the ring)
+  const tintU = { value: new THREE.Color().setHSL(((index * 0.618) % 1), 0.95, 0.62) };
+  blocks.push({ u: hiU, v: 0 });
+
   const r0 = R_IN, r1 = R_OUT, h = HALF_H, v = [];
   [-h, h].forEach(y => { arc(r0, a0, a1, y, v); arc(r1, a0, a1, y, v); });
   [a0, a1].forEach(a => [-h, h].forEach(y => v.push(P(r0, a, y), P(r1, a, y))));
   [r0, r1].forEach(r => [a0, a1].forEach(a => v.push(P(r, a, -h), P(r, a, h))));
-  ring.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(v), lineMat));
+  // build thick-line geometry: 4 vertices per edge
+  const nSeg = v.length / 2;
+  const posA = new Float32Array(nSeg * 4 * 3), posB = new Float32Array(nSeg * 4 * 3);
+  const side = new Float32Array(nSeg * 4), endF = new Float32Array(nSeg * 4);
+  const idx = new Uint32Array(nSeg * 6);
+  for (let s = 0; s < nSeg; s++) {
+    const A = v[s * 2], B = v[s * 2 + 1];
+    for (let k = 0; k < 4; k++) {
+      const o = (s * 4 + k) * 3;
+      posA[o] = A.x; posA[o+1] = A.y; posA[o+2] = A.z;
+      posB[o] = B.x; posB[o+1] = B.y; posB[o+2] = B.z;
+      side[s * 4 + k] = (k % 2 === 0) ? -1 : 1;
+      endF[s * 4 + k] = k < 2 ? 0 : 1;
+    }
+    const b = s * 4;
+    idx.set([b, b+1, b+2, b+1, b+3, b+2], s * 6);
+  }
+  const lg = new THREE.BufferGeometry();
+  lg.setAttribute('position', new THREE.BufferAttribute(posA, 3));
+  lg.setAttribute('aOther', new THREE.BufferAttribute(posB, 3));
+  lg.setAttribute('aSide', new THREE.BufferAttribute(side, 1));
+  lg.setAttribute('aEnd', new THREE.BufferAttribute(endF, 1));
+  lg.setIndex(new THREE.BufferAttribute(idx, 1));
+  const ls = new THREE.Mesh(lg, lineMaterial(hiU, tintU));
+  ls.frustumCulled = false;
+  ring.add(ls);
 
-  // many tiny, mostly faint dots (a few brighter)
-  dots(r0, r1, a0, a1, h, DOTS_PER_BLOCK, 1.0, 0.15, 1.0, 2.2);
-  // a few slightly larger, moderately glowing dots
-  dots(r0, r1, a0, a1, h, GLOW_PER_BLOCK, 2.0, 0.45, 0.8, 1.0);
+  dots(r0, r1, a0, a1, h, DOTS_PER_BLOCK, pointMaterial(1.0, hiU, tintU), 0.15, 1.0, 2.2);
+  dots(r0, r1, a0, a1, h, GLOW_PER_BLOCK, pointMaterial(2.0, hiU, tintU), 0.45, 0.8, 1.0);
+}
+for (let i = 0; i < SEGMENTS; i++) addBlock(i * STEP + GAP, (i + 1) * STEP - GAP, i);
+
+/* ---------- Background stars (fixed, faint, far away) ---------- */
+(function addStars() {
+  const n = 800, pos = new Float32Array(n * 3), br = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const u = Math.random() * 2 - 1, th = Math.random() * Math.PI * 2;
+    const s = Math.sqrt(1 - u * u), R = 70 + Math.random() * 60;
+    pos[i*3] = s * Math.cos(th) * R; pos[i*3+1] = u * R; pos[i*3+2] = s * Math.sin(th) * R;
+    br[i] = 0.03 + Math.pow(Math.random(), 3) * 0.2;   // barely-there, keeps the sky near pitch black
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('aB', new THREE.BufferAttribute(br, 1));
+  const m = new THREE.ShaderMaterial({
+    uniforms: shared, transparent: true, depthWrite: false,
+    vertexShader: `
+      uniform float uPR; attribute float aB; varying float vB;
+      void main(){ vB = aB; gl_PointSize = 1.0 * uPR;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `
+      uniform float uFade; varying float vB;
+      void main(){ gl_FragColor = vec4(vec3(1.0), vB * uFade); }`
+  });
+  const stars = new THREE.Points(g, m);
+  stars.frustumCulled = false;
+  scene.add(stars);
+})();
+
+/* ---------- Picking: march a ray through the ring's local space ---------- */
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2(), inv = new THREE.Matrix4();
+function pick(cx, cy) {
+  ndc.set(cx / innerWidth * 2 - 1, -(cy / innerHeight * 2 - 1));
+  ray.setFromCamera(ndc, camera);
+  pivot.updateMatrixWorld(true);
+  inv.copy(ring.matrixWorld).invert();
+  const o = ray.ray.origin.clone().applyMatrix4(inv);
+  const dir = ray.ray.direction.clone().transformDirection(inv);
+  const d = o.length();
+  for (let t = d - R_OUT - 0.5; t < d + R_OUT + 0.5; t += 0.04) {
+    const x = o.x + dir.x * t, y = o.y + dir.y * t, z = o.z + dir.z * t;
+    if (Math.abs(y) > HALF_H) continue;
+    const r = Math.hypot(x, z);
+    if (r < R_IN || r > R_OUT) continue;
+    let a = Math.atan2(z, x); if (a < 0) a += Math.PI * 2;
+    const idx = Math.floor(a / STEP);
+    if (a >= idx * STEP + GAP && a <= (idx + 1) * STEP - GAP) return idx % SEGMENTS;
+  }
+  return -1;
 }
 
-const step = (Math.PI * 2) / SEGMENTS;
-for (let i = 0; i < SEGMENTS; i++) {
-  addBlock(i * step + GAP, (i + 1) * step - GAP);   // identical blocks
-}
+/* ---------- Input: drag, pinch/wheel zoom, hover, tap ---------- */
+const el = renderer.domElement;
+const pointers = new Map();
+let velX = 0, velY = 0, moved = 0, pinchStart = 0, zoomAtPinch = 1;
+let spinning = true, hoverIdx = -1;
+const selected = new Set();   // every touched block stays lit in its own color
 
-let spinning = true;
-addEventListener('click', () => spinning = !spinning);
-addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); placeCamera(); });
+el.addEventListener('pointerdown', e => {
+  el.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  el.style.cursor = 'grabbing';
+  if (pointers.size === 1) moved = 0;
+  if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    pinchStart = Math.hypot(a.x - b.x, a.y - b.y);
+    zoomAtPinch = zoomTarget;
+  }
+});
+el.addEventListener('pointermove', e => {
+  const p = pointers.get(e.pointerId);
+  if (!p) {                                   // mouse hover, no button pressed
+    if (e.pointerType === 'mouse') {
+      hoverIdx = pick(e.clientX, e.clientY);
+      el.style.cursor = hoverIdx >= 0 ? 'pointer' : 'grab';
+    }
+    return;
+  }
+  const dx = e.clientX - p.x, dy = e.clientY - p.y;
+  p.x = e.clientX; p.y = e.clientY;
+  if (pointers.size === 1) {
+    moved += Math.abs(dx) + Math.abs(dy);
+    velY = dx * 0.006; velX = dy * 0.006;
+    pivot.rotation.y += velY;
+    pivot.rotation.x += velX;
+  } else if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    const d = Math.hypot(a.x - b.x, a.y - b.y);
+    zoomTarget = Math.min(2.2, Math.max(0.5, zoomAtPinch * pinchStart / d));
+    moved = 999;
+  }
+});
+function endPointer(e) {
+  const had = pointers.has(e.pointerId);
+  pointers.delete(e.pointerId);
+  el.style.cursor = hoverIdx >= 0 ? 'pointer' : 'grab';
+  if (had && pointers.size === 0 && moved < 6) {          // a tap
+    const hit = pick(e.clientX, e.clientY);
+    if (hit >= 0) { selected.has(hit) ? selected.delete(hit) : selected.add(hit); } // tap block = light / unlight
+    else spinning = !spinning;                                                        // tap empty space = pause / resume
+  }
+}
+el.addEventListener('pointerup', endPointer);
+el.addEventListener('pointercancel', endPointer);
+el.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse') hoverIdx = -1; });
+el.addEventListener('wheel', e => {
+  e.preventDefault();
+  zoomTarget = Math.min(2.2, Math.max(0.5, zoomTarget * (1 + e.deltaY * 0.001)));
+}, { passive: false });
+
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+  const pr = renderer.getPixelRatio();
+  shared.uPR.value = pr;
+  shared.uRes.value.set(innerWidth * pr, innerHeight * pr);
+  shared.uWidth.value = 2.4 * pr;
+});
+
+/* ---------- Animation with smooth start ---------- */
+const clock = new THREE.Clock();
+const easeOut = t => 1 - Math.pow(1 - t, 3);
+const easeInOut = t => t * t * (3 - 2 * t);
+let spinSpeed = 0;
 
 function animate() {
   requestAnimationFrame(animate);
-  if (spinning) ring.rotation.y += 0.004;
+  const t = clock.getElapsedTime();
+
+  shared.uFade.value = easeOut(Math.min(t / 2.5, 1));
+  const intro = 1 + 0.2 * (1 - easeOut(Math.min(t / 3, 1)));
+  const target = spinning ? easeInOut(Math.min(t / 3.5, 1)) : 0;
+  spinSpeed += (target - spinSpeed) * 0.06;
+  ring.rotation.y += 0.004 * spinSpeed;
+
+  if (pointers.size === 0) {
+    pivot.rotation.y += velY; pivot.rotation.x += velX;
+    velX *= 0.94; velY *= 0.94;
+  }
+
+  // block highlight easing
+  for (let i = 0; i < blocks.length; i++) {
+    const want = (i === hoverIdx || selected.has(i)) ? 1 : 0;
+    blocks[i].v += (want - blocks[i].v) * 0.15;
+    blocks[i].u.value = blocks[i].v;
+  }
+
+  zoom += (zoomTarget - zoom) * 0.12;
+  placeCamera(intro);
+
+  const d = camera.position.length();
+  shared.uNear.value = d - R_OUT;
+  shared.uFar.value  = d + R_OUT;
+
   renderer.render(scene, camera);
 }
 animate();
