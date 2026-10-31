@@ -1,946 +1,368 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Blue Ring</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Landing Leg Rig</title>
+<meta name="claude:viewport-fit-sides" content="cover">
 <style>
-  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
-  canvas { display: block; touch-action: none; cursor: grab; }
+  /* Layout: one full-height 3D view with three buttons floating at the bottom. */
+  :root {
+    --bg: #eef0f2; --fg: #1b2127; --muted: #5b6670; --panel: #ffffff; --line: #cfd5da; --accent: #d9541e;
+    --mono: ui-monospace, Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14181c; --fg: #e6eaee; --muted: #9aa5af; --panel: #1d2329; --line: #323b43; --accent: #ff7a3d;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14181c; --fg: #e6eaee; --muted: #9aa5af; --panel: #1d2329; --line: #323b43; --accent: #ff7a3d;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--fg); font-family: var(--sans);
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 12px;
+    display: flex; flex-direction: column;
+  }
+  #view { flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; position: relative; }
+  #view canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+  #hint { position: absolute; left: 10px; top: 8px; font: 12px var(--mono); color: #e8edf0; text-shadow: 0 1px 2px rgba(0,0,0,.6); pointer-events: none; }
+  #bar { position: absolute; left: 12px; right: 12px; bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  button {
+    font: 500 14px var(--sans); color: var(--fg); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 4px; padding: 9px 16px; cursor: pointer;
+  }
+  button.primary { color: #fff; background: var(--accent); border-color: var(--accent); min-width: 88px; }
+  button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  button:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
 </style>
+<style>body { margin: 0; font-size: 14px; } [hidden] { display: none !important; }</style>
 </head>
 <body>
+<div id="view">
+  <div id="hint">drag to orbit · scroll or pinch to zoom</div>
+  <div id="bar">
+    <button id="go" class="primary" type="button">Land</button>
+    <button id="camA" type="button" aria-pressed="true">Whole rocket</button>
+    <button id="camB" type="button" aria-pressed="false">Leg close-up</button>
+  </div>
+</div>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
 <script>
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-renderer.setSize(innerWidth, innerHeight);
-renderer.setClearColor(0x000000);
-document.body.appendChild(renderer.domElement);
+(function () {
+  /* ---------- Leg mechanism (SI units, 1 scene unit = 1 m) ----------
+     Hinge P on the body. The body joint B sits c above P and s inboard of it (toward the body).
+     The leg joint A sits ON the leg axis, d out from P, so the rod end is pinned straight to the leg:
+       A = P + d (sin(theta), cos(theta)),   B = P + (-s, c),   theta measured from straight up, outward positive.
+     The actuator is the only input. Its length L = |A - B| is set, and the leg angle follows from the triangle P-B-A:
+       L^2 = d^2 + rB^2 - 2 d rB cos(theta + beta),   rB = hypot(s, c),   beta = atan2(s, c)
+       theta = acos((d^2 + rB^2 - L^2) / (2 d rB)) - beta.
+     The standoff s keeps B off the leg line when stowed, so the actuator has leverage from the first millimetre. */
+  var l = 2.6;                                     // leg length
+  var RB = 1.0;                                    // booster radius
+  var thMax = 141.33 * Math.PI / 180;              // leg angle at touchdown
+  var hingeY = 0.35 - l * Math.cos(thMax);         // hinge height when landed: the foot ball joint sits 0.35 m above a flat pad
+  var d = 1.0, s = 0.4, c = 2.9;
+  var T = 2.5;                                     // leg deploy time
+  var rB = Math.hypot(s, c), beta = Math.atan2(s, c);
 
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.1, 200);
+  function PXof() { return RB + s + 0.15; }       // hinge distance from the booster axis
+  function Lof(th) { return Math.sqrt(d * d + rB * rB - 2 * d * rB * Math.cos(th + beta)); }
+  function thOf(L) { var cp = (d * d + rB * rB - L * L) / (2 * d * rB); return Math.acos(Math.max(-1, Math.min(1, cp))) - beta; }
+  function mj(u) { u = Math.max(0, Math.min(1, u)); return u * u * u * (10 - 15 * u + 6 * u * u); }  // min-jerk 0..1
+  var Lmin = Lof(0), Lmax = Lof(thMax), stroke = Lmax - Lmin;
 
-const ELEVATION = 42 * Math.PI / 180;
-const ROLL = 0.55;
-let zoom = 1, zoomTarget = 1, explodeAmt = 0;
-function placeCamera() {
-  const aspect = innerWidth / innerHeight;
-  const dist = 15.5 * Math.max(1, 1 / aspect) * zoom * (1 + 0.85 * explodeAmt);
-  const ty = -3.1 * explodeAmt;
-  camera.position.set(0, Math.sin(ELEVATION) * dist + ty, Math.cos(ELEVATION) * dist);
-  camera.up.set(Math.sin(ROLL), Math.cos(ROLL), 0);
-  camera.lookAt(0, ty, 0);
-  camera.aspect = aspect;
-  camera.updateProjectionMatrix();
-}
-placeCamera();
+  /* ---------- Scene ---------- */
+  var view = document.getElementById('view');
+  var scene = new THREE.Scene();
+  var camera = new THREE.PerspectiveCamera(40, 1, 0.5, 400);
+  var renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.shadowMap.enabled = true;
+  view.appendChild(renderer.domElement);
+  scene.add(new THREE.HemisphereLight(0xdfe8f2, 0x5b6168, 0.8));
+  var sun = new THREE.DirectionalLight(0xffffff, 0.95);
+  sun.position.set(14, 30, 10);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.camera.left = -26; sun.shadow.camera.right = 26; sun.shadow.camera.top = 26; sun.shadow.camera.bottom = -26;
+  sun.shadow.camera.near = 1; sun.shadow.camera.far = 100;
+  sun.shadow.bias = -0.0006;
+  scene.add(sun);
 
-/* Layer 0 = glowing parts (bloom). Layer 1 = solid parts, drawn after, no bloom. */
-const amb = new THREE.AmbientLight(0xffffff, 0.85);
-amb.layers.enable(1);
-scene.add(amb);
-const sun = new THREE.DirectionalLight(0xffffff, 0.7);
-sun.position.set(4, 10, 6);
-sun.layers.enable(1);
-scene.add(sun);
+  var M = function (col, mt, r) { return new THREE.MeshStandardMaterial({ color: col, metalness: mt, roughness: r, side: THREE.DoubleSide }); };
+  var white = M(0xe9edef, 0.1, 0.5), black = M(0x1c1f22, 0.3, 0.6), soot = M(0x34383c, 0.2, 0.8),
+      steel = M(0x4a5560, 0.6, 0.45), orange = M(0xe0652a, 0.2, 0.55), chrome = M(0xd5dade, 0.9, 0.25),
+      dark = M(0x23282d, 0.5, 0.5), ti = M(0x8d9398, 0.8, 0.4), nozzle = M(0x2f3338, 0.7, 0.4), skirt = M(0x575d63, 0.5, 0.6);
 
-const R_IN = 2.0, R_OUT = 3.1, THICK = 0.8;
-const shape = new THREE.Shape();
-shape.absarc(0, 0, R_OUT, 0, Math.PI * 2, false);
-const hole = new THREE.Path();
-hole.absarc(0, 0, R_IN, 0, Math.PI * 2, true);
-shape.holes.push(hole);
-
-const geo = new THREE.ExtrudeGeometry(shape, { depth: THICK, curveSegments: 160, bevelEnabled: false });
-geo.translate(0, 0, -THICK / 2);
-geo.rotateX(-Math.PI / 2);
-
-const glowMat = new THREE.ShaderMaterial({
-  transparent: true, depthWrite: false, side: THREE.DoubleSide,
-  blending: THREE.AdditiveBlending,
-  vertexShader: `
-    varying vec3 vN, vV;
-    void main(){
-      vec4 mv = modelViewMatrix * vec4(position, 1.0);
-      vN = normalize(normalMatrix * normal);
-      vV = normalize(-mv.xyz);
-      gl_Position = projectionMatrix * mv;
-    }`,
-  fragmentShader: `
-    varying vec3 vN, vV;
-    void main(){
-      float f = pow(1.0 - abs(dot(normalize(vN), normalize(vV))), 2.2);
-      float a = 0.40 + 0.50 * f;
-      vec3 c = vec3(0.02, 0.10, 0.85) * (1.2 + 1.6 * f);
-      gl_FragColor = vec4(c * a, a);
-    }`
-});
-const ring = new THREE.Mesh(geo, glowMat);
-
-const edgeMat = new THREE.MeshBasicMaterial({ color: 0x2a46d8 });
-[R_IN, R_OUT].forEach(r => [-THICK / 2, THICK / 2].forEach(y => {
-  const t = new THREE.Mesh(new THREE.TorusGeometry(r, 0.026, 8, 240), edgeMat);
-  t.rotation.x = Math.PI / 2;
-  t.position.y = y;
-  ring.add(t);
-}));
-
-const coreMat = new THREE.ShaderMaterial({
-  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-  uniforms: { uTime: { value: 0 }, uIntensity: { value: 1 } },
-  vertexShader: `
-    varying vec3 vN, vV, vP;
-    void main(){
-      vP = position;
-      vec4 mv = modelViewMatrix * vec4(position, 1.0);
-      vN = normalize(normalMatrix * normal);
-      vV = normalize(-mv.xyz);
-      gl_Position = projectionMatrix * mv;
-    }`,
-  fragmentShader: `
-    varying vec3 vN, vV, vP;
-    uniform float uTime, uIntensity;
-    void main(){
-      float c = pow(abs(dot(normalize(vN), normalize(vV))), 1.6);
-      float ang = atan(vP.z, vP.x);                              // position around the ring
-      float phi = atan(vP.y, length(vP.xz) - 2.55);              // position around the tube
-      float s1 = 0.5 + 0.5 * sin(ang * 7.0 + phi * 2.0 - uTime * 2.4);
-      float s2 = 0.5 + 0.5 * sin(ang * 13.0 - phi * 3.0 - uTime * 3.6);
-      float s3 = 0.5 + 0.5 * sin(ang * 3.0 - uTime * 1.6);
-      float flow = 0.35 + 0.65 * (0.5 * s1 * s1 + 0.3 * s2 * s2 * s2 + 0.2 * s3);
-      float a = 0.8 * c * uIntensity * flow;
-      vec3 col = mix(vec3(0.02, 0.10, 0.80), vec3(0.18, 0.32, 1.0), pow(s1 * s2, 2.0));
-      gl_FragColor = vec4(col * a * 2.0, a);
-    }`
-});
-const coreGeo = new THREE.TorusGeometry((R_IN + R_OUT) / 2, 0.3, 24, 240);
-coreGeo.rotateX(Math.PI / 2);
-ring.add(new THREE.Mesh(coreGeo, coreMat));
-
-/* 16 wrap lines = 8 pairs, each one full turn around the ring's cross-section */
-const PAIRS = 8;
-const PAIR_HALF_GAP = 0.135;
-const RIB_WIDTH = 0.10; const RIB_HEIGHT = 0.07;
-const wrapMat = new THREE.MeshPhongMaterial({ color: 0x000000, specular: 0x1a1a1a, shininess: 40, side: THREE.DoubleSide });
-
-function crossSection() {
-  const w = (R_OUT - R_IN) / 2;
-  const h = THICK / 2;
-  const rc = 0.1;
-  const rMid = (R_IN + R_OUT) / 2;
-  const pts = [];
-  const corners = [
-    [ w - rc,  h - rc, 0],
-    [-(w - rc), h - rc, Math.PI / 2],
-    [-(w - rc), -(h - rc), Math.PI],
-    [ w - rc, -(h - rc), Math.PI * 1.5]
-  ];
-  corners.forEach(([cx, cy, a0]) => {
-    for (let i = 0; i <= 8; i++) {
-      const a = a0 + (i / 8) * Math.PI / 2;
-      pts.push([rMid + cx + rc * Math.cos(a), cy + rc * Math.sin(a), Math.cos(a), Math.sin(a)]);
-    }
+  // Landing pad
+  var pad0 = new THREE.Mesh(new THREE.CircleGeometry(40, 64), M(0x80868b, 0.0, 0.95));
+  pad0.rotation.x = -Math.PI / 2; pad0.position.y = -0.02; pad0.receiveShadow = true; scene.add(pad0);
+  var padC = new THREE.Mesh(new THREE.CircleGeometry(8, 64), M(0xa9aeb2, 0.0, 0.9));
+  padC.rotation.x = -Math.PI / 2; padC.position.y = -0.01; padC.receiveShadow = true; scene.add(padC);
+  var padRing = new THREE.Mesh(new THREE.RingGeometry(6.6, 6.8, 64), new THREE.MeshBasicMaterial({ color: 0xf2f2f0 }));
+  padRing.rotation.x = -Math.PI / 2; padRing.position.y = 0.0; scene.add(padRing);
+  [Math.PI / 4, -Math.PI / 4].forEach(function (a) {
+    var bar = new THREE.Mesh(new THREE.PlaneGeometry(13, 0.45), new THREE.MeshBasicMaterial({ color: 0xf2f2f0 }));
+    bar.rotation.x = -Math.PI / 2; bar.rotation.z = a; bar.position.y = 0.0; scene.add(bar);
   });
-  return pts;
-}
-const section = crossSection();
 
-function makeWrap(phi) {
-  const c = Math.cos(phi), s = Math.sin(phi);
-  const tx = -s, tz = c;
-  const hw = RIB_WIDTH / 2;
-  const prof = [[-hw, 0], [-hw, RIB_HEIGHT], [hw, RIB_HEIGHT], [hw, 0]];
-  const N = section.length;
-  const pos = [], idx = [];
-  for (let side = 0; side < 3; side++) {
-    const base = pos.length / 3;
-    for (let i = 0; i < N; i++) {
-      const [r, y, nr, ny] = section[i];
-      [prof[side], prof[side + 1]].forEach(([u, v]) => {
-        const rr = r + nr * v, yy = y + ny * v;
-        pos.push(rr * c + tx * u, yy, rr * s + tz * u);
-      });
-    }
-    for (let i = 0; i < N; i++) {
-      const a = base + i * 2, b = base + ((i + 1) % N) * 2;
-      idx.push(a, a + 1, b, b, a + 1, b + 1);
-    }
+  // Rocket group: origin at the pad when landed
+  var rocket = new THREE.Group();
+  scene.add(rocket);
+  function cyl(rt, rb, h, y, mat, seg) {
+    var mm = new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, seg || 48), mat);
+    mm.position.y = y; rocket.add(mm); return mm;
   }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  g.setIndex(idx);
-  g.computeVertexNormals();
-  const rib = new THREE.Mesh(g, wrapMat);
-  rib.layers.set(1);
-  return rib;
-}
-
-const group1 = new THREE.Group();
-group1.name = 'Group 1';
-const windings = new THREE.Group();
-windings.name = 'Windings';
-ring.add(windings);
-windings.add(group1);
-const WIRE_R = 0.02;
-const WIRES_PER_GAP = 22;
-const WIRE_SPAN = PAIR_HALF_GAP - 0.036;
-function makeStudioEnv() {
-  const faces = [];
-  for (let f = 0; f < 6; f++) {
-    const c = document.createElement('canvas');
-    c.width = c.height = 128;
-    const g = c.getContext('2d');
-    const grad = g.createLinearGradient(0, 0, 0, 128);
-    if (f === 2) { grad.addColorStop(0, '#ffffff'); grad.addColorStop(1, '#d8d8d8'); }
-    else if (f === 3) { grad.addColorStop(0, '#1a1a1a'); grad.addColorStop(1, '#0c0c0c'); }
-    else {
-      grad.addColorStop(0, '#f2f2f2'); grad.addColorStop(0.45, '#9a9a9a');
-      grad.addColorStop(0.55, '#3a3a3a'); grad.addColorStop(1, '#161616');
-    }
-    g.fillStyle = grad; g.fillRect(0, 0, 128, 128);
-    if (f !== 2 && f !== 3) {
-      g.fillStyle = '#ffffff'; g.fillRect(20 + f * 7, 0, 14, 128); g.fillRect(88 - f * 5, 0, 8, 128);
-    }
-    faces.push(c);
-  }
-  const tex = new THREE.CubeTexture(faces);
-  tex.needsUpdate = true;
-  return tex;
-}
-const copperMat = new THREE.MeshStandardMaterial({
-  color: 0xf0a47c, metalness: 1.0, roughness: 0.28,
-  envMap: makeStudioEnv(), envMapIntensity: 1.25
-});
-const wirePts = section.map(([r, y, nr, ny]) => new THREE.Vector3(r + nr * WIRE_R, y + ny * WIRE_R, 0));
-const wireGeo = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(wirePts, true, 'centripetal'), 160, WIRE_R, 8, true);
-
-for (let k = 0; k < PAIRS; k++) {
-  const center = (k / PAIRS) * Math.PI * 2;
-  group1.add(makeWrap(center - PAIR_HALF_GAP));
-  group1.add(makeWrap(center + PAIR_HALF_GAP));
-  for (let i = 0; i < WIRES_PER_GAP; i++) {
-    const phi = center - WIRE_SPAN + (i / (WIRES_PER_GAP - 1)) * 2 * WIRE_SPAN;
-    const wire = new THREE.Mesh(wireGeo, copperMat);
-    wire.rotation.y = -phi;
-    wire.layers.set(1);
-    windings.add(wire);
-  }
-}
-
-/* Plate inside the ring's hole: slotted top layer, hex screws, tabs, two copper rings */
-const PLATE_R_OUT = R_IN;
-const PLATE_R_HOLE = 1.1;
-const PLATE_LAYER = 0.12;
-const SLOT_COUNT = 24, SLOT_LEN = 0.72, SLOT_W = 0.2;
-const SCREW_COUNT = 3;
-const SLOT_MID_R = (PLATE_R_OUT + PLATE_R_HOLE) / 2;
-
-function plateShape(withSlots) {
-  const sh = new THREE.Shape();
-  sh.absarc(0, 0, PLATE_R_OUT, 0, Math.PI * 2, false);
-  const mid = new THREE.Path();
-  mid.absarc(0, 0, PLATE_R_HOLE, 0, Math.PI * 2, true);
-  sh.holes.push(mid);
-  if (withSlots) {
-    for (let k = 0; k < SLOT_COUNT; k++) {
-      if (k % (SLOT_COUNT / SCREW_COUNT) === 0) continue;
-      const a = (k / SLOT_COUNT) * Math.PI * 2;
-      const ca = Math.cos(a), sa = Math.sin(a);
-      const half = SLOT_LEN / 2 - SLOT_W / 2;
-      const pts = [];
-      for (let i = 0; i <= 12; i++) {
-        const t = -Math.PI / 2 + (i / 12) * Math.PI;
-        pts.push([half + (SLOT_W / 2) * Math.cos(t), (SLOT_W / 2) * Math.sin(t)]);
-      }
-      for (let i = 0; i <= 12; i++) {
-        const t = Math.PI / 2 + (i / 12) * Math.PI;
-        pts.push([-half + (SLOT_W / 2) * Math.cos(t), (SLOT_W / 2) * Math.sin(t)]);
-      }
-      const world = pts.map(([lx, ly]) => {
-        const x = SLOT_MID_R + lx;
-        return new THREE.Vector2(x * ca - ly * sa, x * sa + ly * ca);
-      });
-      sh.holes.push(new THREE.Path(world));
-    }
-  }
-  return sh;
-}
-
-const plateMat = new THREE.MeshPhongMaterial({ color: 0x59626f, specular: 0xaab4c4, shininess: 70, side: THREE.DoubleSide });
-const plateOpts = { depth: PLATE_LAYER, curveSegments: 128, bevelEnabled: false };
-
-const baseGeo = new THREE.ExtrudeGeometry(plateShape(true), plateOpts);
-baseGeo.translate(0, 0, -PLATE_LAYER);
-baseGeo.rotateX(-Math.PI / 2);
-const topGeo = new THREE.ExtrudeGeometry(plateShape(true), plateOpts);
-topGeo.rotateX(-Math.PI / 2);
-
-const plate = new THREE.Group();
-plate.name = 'Plate';
-[baseGeo, topGeo].forEach(g => {
-  const m = new THREE.Mesh(g, plateMat);
-  m.layers.set(1);
-  plate.add(m);
-});
-const HEX_R = 0.2, HEAD_H = 0.16, CHAMFER = 0.025, WASHER_R = 0.23, WASHER_H = 0.03;
-const hexShape = new THREE.Shape();
-for (let i = 0; i < 6; i++) {
-  const t = i * Math.PI / 3, x = HEX_R * Math.cos(t), y = HEX_R * Math.sin(t);
-  if (i === 0) hexShape.moveTo(x, y); else hexShape.lineTo(x, y);
-}
-hexShape.closePath();
-const headGeo = new THREE.ExtrudeGeometry(hexShape, {
-  depth: HEAD_H - 2 * CHAMFER, curveSegments: 1, bevelEnabled: true,
-  bevelThickness: CHAMFER, bevelSize: CHAMFER, bevelOffset: -CHAMFER, bevelSegments: 2
-});
-headGeo.translate(0, 0, CHAMFER);
-headGeo.rotateX(-Math.PI / 2);
-headGeo.translate(0, WASHER_H, 0);
-const washerGeo = new THREE.CylinderGeometry(WASHER_R, WASHER_R, WASHER_H, 32);
-washerGeo.translate(0, WASHER_H / 2, 0);
-const shankBottom = -(2 * PLATE_LAYER + 0.15);
-const shankGeo = new THREE.CylinderGeometry(0.07, 0.07, WASHER_H - shankBottom, 16);
-shankGeo.translate(0, (WASHER_H + shankBottom) / 2, 0);
-const screwMat = new THREE.MeshPhongMaterial({ color: 0x9aa4b2, specular: 0xffffff, shininess: 90 });
-const TAB_LEN = 1.25, TAB_W = 0.26, TAB_T = 0.05, TAB_BACK = 0.1;
-const tabGeo = new THREE.BoxGeometry(TAB_LEN + TAB_BACK, TAB_T, TAB_W);
-tabGeo.translate((TAB_LEN - TAB_BACK) / 2, 0, 0);
-for (let j = 0; j < SCREW_COUNT; j++) {
-  const a = (j / SCREW_COUNT) * Math.PI * 2;
-  const screw = new THREE.Group();
-  screw.name = 'Screw ' + (j + 1);
-  [headGeo, washerGeo, shankGeo].forEach(g => {
-    const m = new THREE.Mesh(g, screwMat);
-    m.layers.set(1);
-    screw.add(m);
+  cyl(RB, RB, 11.1, 1.9 + 11.1 / 2, white);                // first stage tank, y 1.9 to 13.0
+  cyl(RB + 0.004, RB + 0.004, 1.1, 1.9 + 0.55, soot);       // sooted base
+  [4.4, 6.9, 9.4, 11.6].forEach(function (y) { cyl(RB + 0.006, RB + 0.006, 0.04, y, dark); });
+  cyl(RB + 0.002, RB + 0.002, 1.4, 13.7, black);            // interstage, y 13.0 to 14.4
+  cyl(RB, RB, 4.0, 16.4, white);                            // second stage, y 14.4 to 18.4
+  cyl(RB + 0.004, RB + 0.004, 0.05, 14.45, dark);
+  var pts = [], k;
+  for (k = 0; k <= 28; k++) { var su = k / 28; pts.push(new THREE.Vector2(RB * Math.sqrt(Math.max(0, 1 - Math.pow(su, 1.8))), 18.4 + 4.2 * su)); }
+  var fairing = new THREE.Mesh(new THREE.LatheGeometry(pts, 48), white);
+  rocket.add(fairing);
+  cyl(0.97, 0.97, 0.4, 1.7, skirt);                         // engine skirt
+  var nz = [[0, 0]];
+  for (k = 0; k < 8; k++) nz.push([0.6 * Math.cos(k * Math.PI / 4), 0.6 * Math.sin(k * Math.PI / 4)]);
+  nz.forEach(function (p) {
+    var n = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.19, 0.85, 20, 1, true), nozzle);
+    n.position.set(p[0], 1.075, p[1]); rocket.add(n);
   });
-  const tab = new THREE.Mesh(tabGeo, screwMat);
-  tab.layers.set(1);
-  tab.position.y = -(2 * PLATE_LAYER) - TAB_T / 2;
-  tab.rotation.y = a + Math.PI;
-  screw.add(tab);
-  screw.position.set(SLOT_MID_R * Math.cos(a), PLATE_LAYER, -SLOT_MID_R * Math.sin(a));
-  plate.add(screw);
-}
-const RING_TUBE = 0.03;
-[0.95, 0.6].forEach(r => {
-  const g = new THREE.TorusGeometry(r, RING_TUBE, 16, 160);
-  g.rotateX(Math.PI / 2);
-  const m = new THREE.Mesh(g, copperMat);
-  m.position.y = -PLATE_LAYER + RING_TUBE;
-  m.layers.set(1);
-  plate.add(m);
-});
-ring.add(plate);
-
-/* Discs stacked under the object */
-const DISC_T = 0.06;
-const DISC_GAP = 2.4;
-const DISC_RADII = [PLATE_R_OUT, 1.88];
-const DISC_THICK = [DISC_T, 0.12];
-const GRID_STEP = 0.18;
-const GRID_W = 0.006;
-const gridMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.8, depthWrite: false, side: THREE.DoubleSide });
-function gridGeometry(r) {
-  const p = [], idx = [], K = Math.floor(r / GRID_STEP), hw = GRID_W / 2;
-  const quad = (x0, z0, x1, z1, nx, nz) => {
-    const i = p.length / 3;
-    p.push(x0 - nx * hw, 0, z0 - nz * hw, x0 + nx * hw, 0, z0 + nz * hw,
-           x1 - nx * hw, 0, z1 - nz * hw, x1 + nx * hw, 0, z1 + nz * hw);
-    idx.push(i, i + 1, i + 2, i + 2, i + 1, i + 3);
-  };
-  for (let k = -K; k <= K; k++) {
-    const v = k * GRID_STEP, h = Math.sqrt(Math.max(0, r * r - v * v));
-    quad(v, -h, v, h, 1, 0);
-    quad(-h, v, h, v, 0, 1);
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(p, 3));
-  g.setIndex(idx);
-  return g;
-}
-const discBlueMat = new THREE.ShaderMaterial({
-  transparent: true, depthWrite: false, side: THREE.DoubleSide,
-  blending: THREE.AdditiveBlending,
-  vertexShader: `
-    varying vec3 vN, vV;
-    void main(){
-      vec4 mv = modelViewMatrix * vec4(position, 1.0);
-      vN = normalize(normalMatrix * normal);
-      vV = normalize(-mv.xyz);
-      gl_Position = projectionMatrix * mv;
-    }`,
-  fragmentShader: `
-    varying vec3 vN, vV;
-    void main(){
-      float f = pow(1.0 - abs(dot(normalize(vN), normalize(vV))), 2.0);
-      float a = 0.42 + 0.3 * f;
-      vec3 c = vec3(0.06, 0.42, 1.0) * (1.0 + 0.8 * f);
-      gl_FragColor = vec4(c * a, a);
-    }`
-});
-/* Filler discs: solid glowing blue when assembled */
-const fillerGlowMat = discBlueMat.clone();
-fillerGlowMat.transparent = false;
-fillerGlowMat.depthWrite = true;
-fillerGlowMat.blending = THREE.NoBlending;
-fillerGlowMat.uniforms = { uTime: { value: 0 }, uY: { value: 0 } };
-fillerGlowMat.fragmentShader = `
-    varying vec3 vN, vV;
-    uniform float uTime, uY;
-    void main(){
-      float f = pow(1.0 - abs(dot(normalize(vN), normalize(vV))), 2.0);
-      float wave = 0.5 + 0.5 * sin(uY * 7.0 - uTime * 4.0);
-      vec3 c = vec3(0.08, 0.50, 1.0) * (1.05 + 0.9 * f + 0.6 * wave);
-      c += vec3(0.30, 0.65, 0.70) * pow(wave, 6.0) * 0.55;
-      gl_FragColor = vec4(c, 1.0);
-    }`;
-fillerGlowMat.needsUpdate = true;
-/* Filler discs in the exploded view: see-through ghosts so the electronics inside are visible */
-const fillerGhostMat = new THREE.ShaderMaterial({
-  transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
-  uniforms: { uTime: { value: 0 }, uY: { value: 0 } },
-  vertexShader: discBlueMat.vertexShader,
-  fragmentShader: `
-    varying vec3 vN, vV;
-    uniform float uTime, uY;
-    void main(){
-      float f = pow(1.0 - abs(dot(normalize(vN), normalize(vV))), 2.0);
-      float a = 0.04 + 0.14 * f;
-      gl_FragColor = vec4(vec3(0.08, 0.5, 1.0) * a * 2.0, a);
-    }`
-});
-const fillerRimMat = new THREE.MeshBasicMaterial({ color: 0x6fd0ff });
-const discBaseMat = new THREE.MeshPhongMaterial({ color: 0xffffff, specular: 0x555555, shininess: 40 });
-const discBlueRimMat = new THREE.MeshBasicMaterial({ color: 0x2f86ff });
-const discRimMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.7, depthWrite: false });
-const discs = new THREE.Group();
-discs.name = 'Translucent Discs';
-let discTop = -PLATE_LAYER;
-DISC_RADII.forEach(r => {
-  const isTop = discs.children.length === 0;
-  const d = new THREE.Mesh(new THREE.CylinderGeometry(r, r, DISC_THICK[discs.children.filter(o => o.geometry.type === 'CylinderGeometry').length], 128), isTop ? discBlueMat : discBaseMat);
-  const thick = d.geometry.parameters.height;
-  d.position.y = discTop - thick / 2;
-  d.layers.set(isTop ? 0 : 1);
-  discs.add(d);
-  const rim = new THREE.Mesh(new THREE.TorusGeometry(r, isTop ? 0.016 : 0.012, 8, 200), isTop ? discBlueRimMat : discRimMat);
-  rim.rotation.x = Math.PI / 2;
-  rim.position.y = discTop;
-  rim.layers.set(isTop ? 0 : 1);
-  discs.add(rim);
-  if (isTop) {
-    const grid = new THREE.Mesh(gridGeometry(r), gridMat);
-    grid.position.y = discTop - thick - 0.003;
-    grid.rotation.y = Math.PI / 4;
-    grid.layers.set(1);
-    discs.add(grid);
-  }
-  discTop -= thick + DISC_GAP;
-});
-/* Exploded view offsets (scene units). Wider spread so the electronics get room. */
-const E_RING = 4.2, E_WIND = 3.4, E_SCREW = 2.6, E_PTOP = 2.0, E_PBASE = 1.4;
-const E_CURING = [0.95, 0.65], E_TAB = 0.3;
-const E_FILL0 = -0.5, E_FILLSPAN = -5.8, E_BOTTOM = -6.5, E_BRACKET = -7.3;
-const E_POST_TOP = -0.3, E_BOARD = [-0.5, -2.1, -3.7], E_COIL = -5.2, E_FERRITE = -5.9;
-const xItems = [];
-const addX = (o, dy) => { o.userData.y0 = o.position.y; xItems.push({ o, dy }); };
-discs.children.slice(3, 5).forEach(o => addX(o, E_BOTTOM));
-const FILLERS = 30, FILL_R = 1.9, FILL_IN = 1.2;
-const fillerShape = new THREE.Shape();
-fillerShape.absarc(0, 0, FILL_R, 0, Math.PI * 2, false);
-const fillerHole = new THREE.Path();
-fillerHole.absarc(0, 0, FILL_IN, 0, Math.PI * 2, true);
-fillerShape.holes.push(fillerHole);
-const fillerGeo = new THREE.ExtrudeGeometry(fillerShape, { depth: DISC_T, curveSegments: 128, bevelEnabled: false });
-fillerGeo.translate(0, 0, -DISC_T / 2);
-fillerGeo.rotateX(-Math.PI / 2);
-const fillers = [];
-let ghostOn = false;
-function setGhost(on) {
-  if (on === ghostOn) return;
-  ghostOn = on;
-  fillers.forEach(o => {
-    if (o.geometry === fillerGeo) o.material = on ? fillerGhostMat : fillerGlowMat;
-    if (on) o.layers.disable(1); else o.layers.enable(1);   // ghosts never hide the boards behind them
+  var plumes = [];
+  [[0.2, 2.8, 0xffb25a, 0.55], [0.13, 2.2, 0xfff1c8, 0.7]].forEach(function (cfg) {
+    var pm = new THREE.Mesh(new THREE.ConeGeometry(cfg[0], cfg[1], 20, 1, true),
+      new THREE.MeshBasicMaterial({ color: cfg[2], transparent: true, opacity: cfg[3], blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+    pm.rotation.x = Math.PI; pm.position.set(0, 0.65 - cfg[1] / 2, 0); pm.userData.len = cfg[1];
+    rocket.add(pm); plumes.push(pm);
   });
-}
-for (let i = 1; i <= FILLERS; i++) {
-  const t = i / (FILLERS + 1);
-  const r = FILL_R;
-  const y = (-PLATE_LAYER - DISC_T) - t * DISC_GAP;
-  const fd = new THREE.Mesh(fillerGeo, fillerGlowMat);
-  fd.position.y = y;
-  fd.layers.set(0);
-  fd.layers.enable(1);
-  discs.add(fd); fillers.push(fd);
-  const fr = new THREE.Mesh(new THREE.TorusGeometry(r, 0.014, 8, 160), fillerRimMat);
-  fr.rotation.x = Math.PI / 2;
-  fr.position.y = y + DISC_T / 2;
-  fr.layers.set(0);
-  fr.layers.enable(1);
-  discs.add(fr); fillers.push(fr);
-  addX(fd, E_FILL0 + E_FILLSPAN * t);
-  addX(fr, E_FILL0 + E_FILLSPAN * t);
-  const fi = new THREE.Mesh(new THREE.TorusGeometry(FILL_IN, 0.014, 8, 160), fillerRimMat);
-  fi.rotation.x = Math.PI / 2;
-  fi.position.y = y + DISC_T / 2;
-  fi.layers.set(0);
-  fi.layers.enable(1);
-  discs.add(fi); fillers.push(fi);
-  addX(fi, E_FILL0 + E_FILLSPAN * t);
-  fd.onBeforeRender = (rd, sc, cm, g, mat) => { mat.uniforms.uY.value = fd.position.y; mat.uniformsNeedUpdate = true; };
-}
-/* Support brackets traced from the reference photo */
-const BRACKETS = 20;
-const FIN_T = 0.08;
-const UPPER_BOTTOM = -PLATE_LAYER - DISC_T;
-const LOWER_TOP = -PLATE_LAYER - DISC_T - DISC_GAP;
-const LOWER_BOTTOM = LOWER_TOP - DISC_THICK[1];
-const PIECE = [[2,0],[0,9],[0,23],[5,37],[9,39],[8,74],[23,89],[57,89],[60,88],[61,84],[54,81],[55,74],[53,72],[51,72],[51,81],[49,83],[47,82],[47,72],[46,71],[43,73],[44,78],[41,83],[33,82],[25,74],[23,65],[19,63],[20,61],[19,56],[20,25],[15,22],[15,18],[19,16],[18,5],[15,0],[8,1]];
-const PX_TOP = 0, PX_FOOT = 82.5;
-const PX_OUT = 19.5;
-const PK = (UPPER_BOTTOM - LOWER_BOTTOM) / (PX_FOOT - PX_TOP);
-const FIN_OUT = 1.85;
-const prof = new THREE.Shape();
-PIECE.forEach(([px, py], i) => {
-  const rho = FIN_OUT - (px - PX_OUT) * PK;
-  const y = UPPER_BOTTOM - (py - PX_TOP) * PK;
-  if (i === 0) prof.moveTo(rho, y); else prof.lineTo(rho, y);
-});
-prof.closePath();
-const finGeo = new THREE.ExtrudeGeometry(prof, { depth: FIN_T, bevelEnabled: false, curveSegments: 8 });
-finGeo.translate(0, 0, -FIN_T / 2);
-const bracket = new THREE.Group();
-const fin = new THREE.Mesh(finGeo, wrapMat);
-fin.layers.set(1);
-bracket.add(fin);
-const RING_R = FIN_OUT - (8.5 - PX_OUT) * PK, RING_Y = UPPER_BOTTOM - (59.3 - PX_TOP) * PK;
-const finRing = new THREE.Mesh(new THREE.LatheGeometry([
-  new THREE.Vector2(RING_R - 0.03, RING_Y - 0.03), new THREE.Vector2(RING_R + 0.14, RING_Y - 0.03),
-  new THREE.Vector2(RING_R + 0.14, RING_Y + 0.03), new THREE.Vector2(RING_R - 0.03, RING_Y + 0.03),
-  new THREE.Vector2(RING_R - 0.03, RING_Y - 0.03)
-], 160), wrapMat);
-finRing.layers.set(1);
-discs.add(finRing);
-addX(finRing, E_BRACKET);
-for (let j = 0; j < BRACKETS; j++) {
-  const b = bracket.clone();
-  b.rotation.y = (j / BRACKETS) * Math.PI * 2;
-  discs.add(b);
-  addX(b, E_BRACKET);
-}
-/* ---------------- Electronics inside the hollow stack ---------------- */
-const FERRITE_TOP = LOWER_TOP + 0.03, POST_TOP = UPPER_BOTTOM - 0.02, POST_H = POST_TOP - FERRITE_TOP;
-const COIL_Y0 = LOWER_TOP + 0.06;
-const BOARD_Y0 = [-0.8, -1.4, -2.0], BOARD_R = [0.78, 0.66, 0.85];
-const envTex = copperMat.envMap;
-const brassMat = new THREE.MeshStandardMaterial({ color: 0xe3b341, metalness: 1.0, roughness: 0.3, envMap: envTex, envMapIntensity: 1.2 });
-const steelMat = new THREE.MeshStandardMaterial({ color: 0xaab2bd, metalness: 1.0, roughness: 0.35, envMap: envTex, envMapIntensity: 1.1 });
-const pcbGreen = new THREE.MeshPhongMaterial({ color: 0x0c6a35, specular: 0x66aa88, shininess: 60, side: THREE.DoubleSide });
-const pcbBlue = new THREE.MeshPhongMaterial({ color: 0x0e3a8a, specular: 0x6688cc, shininess: 60, side: THREE.DoubleSide });
-const chipMat = new THREE.MeshPhongMaterial({ color: 0x0d0d10, specular: 0x333333, shininess: 30 });
-const ferriteMat = new THREE.MeshPhongMaterial({ color: 0x25262b, specular: 0x222222, shininess: 20 });
-const ledMat = new THREE.MeshBasicMaterial({ color: 0x8ff3ff });
-const resMat = new THREE.MeshPhongMaterial({ color: 0xc9a66b, specular: 0x444444, shininess: 30 });
-const capMat = new THREE.MeshPhongMaterial({ color: 0x1b3f9a, specular: 0x8899ff, shininess: 80 });
-const silkMat = new THREE.MeshBasicMaterial({ color: 0xdfe6ea });
 
-const ferrite = new THREE.Mesh(new THREE.CylinderGeometry(1.16, 1.16, 0.03, 96), ferriteMat);
-ferrite.position.y = LOWER_TOP + 0.015;
-ferrite.layers.set(1);
-discs.add(ferrite);
-addX(ferrite, E_FERRITE);
-
-const COIL_TURNS = 16, COIL_R0 = 1.08, COIL_R1 = 0.30, COIL_PER_TURN = 36;
-const spiralPts = [];
-for (let i = 0; i <= COIL_TURNS * COIL_PER_TURN; i++) {
-  const u = i / (COIL_TURNS * COIL_PER_TURN), ang = u * COIL_TURNS * Math.PI * 2, r = COIL_R0 + (COIL_R1 - COIL_R0) * u;
-  spiralPts.push(new THREE.Vector3(r * Math.cos(ang), 0, -r * Math.sin(ang)));
-}
-const coilCurve = new THREE.CatmullRomCurve3(spiralPts);
-coilCurve.arcLengthDivisions = 1500;
-const coil = new THREE.Mesh(new THREE.TubeGeometry(coilCurve, 1800, 0.022, 6, false), copperMat);
-coil.scale.y = 0.7;
-coil.position.y = COIL_Y0;
-coil.layers.set(1);
-discs.add(coil);
-addX(coil, E_COIL);
-
-const post = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, POST_H, 16), brassMat);
-post.position.y = FERRITE_TOP + POST_H / 2;
-post.layers.set(1);
-discs.add(post);
-
-/* ---------- Real-looking PCBs ----------
-   Each board gets a generated top-layer texture (solder mask, 45-degree copper traces, pads, vias, edge copper pour,
-   mounting holes, silkscreen outlines + reference designators) and 3D parts that sit exactly on the drawn footprints:
-   QFP / SOIC ICs with gull-wing leads, SMD resistors and ceramic caps, electrolytic caps, crystal, power inductors,
-   pin header and LEDs. */
-const D = new THREE.Object3D();
-const PADC = ['#cfd4d8', '#e2b94a'];
-function rnd(seed) { let s = seed >>> 0; return () => (s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296; }
-const PAD_OF = { res: 'pas', cap: 'pas', led: 'pas', qfp: 'qfp', soic: 'soic', hdr: 'hdr', xtal: 'xtal', ecap: 'ecap', ind: 'ind' };
-const CR = { qfp: .19, hdr: .12, soic: .115, xtal: .085, ecap: .08, ind: .08, led: .04, res: .045, cap: .045 };
-const REF = { qfp: 'U', soic: 'U', hdr: 'J', xtal: 'Y', ecap: 'C', ind: 'L', led: 'D', res: 'R', cap: 'C' };
-const OUTL = { qfp: [.24, .24], soic: [.15, .17], hdr: [.24, .1], xtal: [.14, .07], ecap: [.13, .13], ind: [.12, .12], led: [.06, .04], res: [.075, .045], cap: [.075, .045] };
-function padsOf(t) {
-  const p = [];
-  if (t === 'pas') [-1, 1].forEach(s => p.push({ x: s * .032, z: 0, w: .024, h: .032 }));
-  else if (t === 'soic') [-1, 1].forEach(s => { for (let i = 0; i < 4; i++) p.push({ x: (i - 1.5) * .03, z: s * .068, w: .014, h: .03 }); });
-  else if (t === 'qfp') for (let sd = 0; sd < 4; sd++) for (let i = 0; i < 10; i++) {
-    const u = (i - 4.5) * .02, c = Math.cos(sd * Math.PI / 2), s = Math.sin(sd * Math.PI / 2), lz = .14;
-    p.push({ x: u * c - lz * s, z: u * s + lz * c, w: sd % 2 ? .03 : .012, h: sd % 2 ? .012 : .03 });
+  function zCyl(r, len, mat) {
+    var mm = new THREE.Mesh(new THREE.CylinderGeometry(r, r, len, 24), mat);
+    mm.rotation.x = Math.PI / 2;
+    return mm;
   }
-  else if (t === 'hdr') for (let i = 0; i < 4; i++) [-1, 1].forEach(s => p.push({ x: (i - 1.5) * .05, z: s * .025, w: .034, h: .034, round: 1 }));
-  else if (t === 'xtal') [-1, 1].forEach(s => p.push({ x: s * .055, z: 0, w: .03, h: .04 }));
-  else [-1, 1].forEach(s => p.push({ x: s * (t === 'ind' ? .055 : .05), z: 0, w: .03, h: t === 'ind' ? .05 : .04 }));
-  return p;
-}
-const rotW = (c, lx, lz) => [c.x + lx * Math.cos(c.rot) - lz * Math.sin(c.rot), c.z + lx * Math.sin(c.rot) + lz * Math.cos(c.rot)];
 
-function makeBoard(R, mask, trace, padIdx, seed, cnt, name) {
-  const rand = rnd(seed), g = new THREE.Group(), TY = 0.026, padCol = PADC[padIdx];
-  /* ---- layout ---- */
-  const comps = [], obst = [], mounts = [];
-  for (let k = 0; k < 3; k++) { const a = k * 2.094 + 0.5, m = { x: (R - 0.07) * Math.cos(a), z: (R - 0.07) * Math.sin(a), r: 0.06 }; mounts.push(m); obst.push(m); }
-  Object.entries(cnt).forEach(([type, n]) => {
-    for (let i = 0; i < n; i++) for (let tries = 0; tries < 300; tries++) {
-      const rr = 0.17 + rand() * (R - 0.2 - CR[type]), a = rand() * Math.PI * 2, x = rr * Math.cos(a), z = rr * Math.sin(a);
-      if (obst.every(o => Math.hypot(o.x - x, o.z - z) > o.r + CR[type] + 0.012)) {
-        comps.push({ type, x, z, rot: rand() < 0.5 ? 0 : Math.PI / 2 });
-        obst.push({ x, z, r: CR[type] });
-        break;
-      }
-    }
-  });
-  /* ---- texture ---- */
-  const S = 1024, k = S / (2 * R), cv = document.createElement('canvas');
-  cv.width = cv.height = S;
-  const cx = cv.getContext('2d');
-  cx.fillStyle = mask; cx.fillRect(0, 0, S, S);
-  cx.setTransform(k, 0, 0, k, S / 2, S / 2);                       // board units: x right, z down
-  cx.save();                                                       // hatched ground pour near the edge
-  cx.beginPath(); cx.arc(0, 0, R * 0.985, 0, 6.2832); cx.arc(0, 0, R * 0.9, 0, 6.2832, true); cx.clip();
-  cx.strokeStyle = trace; cx.lineWidth = 0.007;
-  for (let t = -R; t <= R; t += 0.026) {
-    cx.beginPath(); cx.moveTo(t - R, -R); cx.lineTo(t + R, R); cx.stroke();
-    cx.beginPath(); cx.moveTo(t + R, -R); cx.lineTo(t - R, R); cx.stroke();
+  /* Fins: four small swept fins at the top of the first stage, exactly where the grid fins were.
+     Each fin is an all-moving surface on a radial shaft, so it can be steered about its own mid-chord.
+     They sit at neutral for now; steerFins() turns them (degrees). */
+  var tailFins = [];
+  function createTailFin(az) {
+    var g = new THREE.Group(); g.rotation.y = az; g.position.y = 13.85; rocket.add(g);
+    var steer = new THREE.Group(); steer.position.x = RB - 0.04; g.add(steer);
+    var sh = new THREE.Shape();
+    sh.moveTo(0, 0.6); sh.lineTo(0.7, -0.05); sh.lineTo(0.7, -0.6); sh.lineTo(0, -0.6); sh.lineTo(0, 0.6);
+    var geo = new THREE.ExtrudeGeometry(sh, { depth: 0.06, bevelEnabled: false });
+    geo.translate(0, 0, -0.03);
+    var blade = new THREE.Mesh(geo, ti);
+    var shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.3, 16), chrome);
+    shaft.rotation.z = Math.PI / 2; shaft.position.x = 0.1;
+    steer.add(blade, shaft);
+    tailFins.push(steer);
   }
-  cx.restore();
-  const pads = comps.flatMap(c => padsOf(PAD_OF[c.type]).map(p => { const [wx, wz] = rotW(c, p.x, p.z); return { ...p, wx, wz, c, n: 0 }; }));
-  cx.strokeStyle = trace; cx.lineWidth = 0.012; cx.lineJoin = cx.lineCap = 'round';
-  const vias = [];
-  pads.slice().sort(() => rand() - 0.5).forEach(a => {            // 45-degree routed traces between nearby pads
-    if (a.n > 1 || rand() > 0.8) return;
-    let best = null, bd = 0.5;
-    pads.forEach(b => { if (b.c === a.c || b.n > 1) return; const d = Math.hypot(a.wx - b.wx, a.wz - b.wz); if (d < bd) { bd = d; best = b; } });
-    if (!best) return;
-    a.n++; best.n++;
-    const dx = best.wx - a.wx, dz = best.wz - a.wz, adx = Math.abs(dx), adz = Math.abs(dz), d = Math.min(adx, adz), s = (Math.max(adx, adz) - d) / 2;
-    const p1 = adx > adz ? [a.wx + Math.sign(dx) * s, a.wz] : [a.wx, a.wz + Math.sign(dz) * s];
-    const p2 = adx > adz ? [a.wx + Math.sign(dx) * (s + d), best.wz] : [best.wx, a.wz + Math.sign(dz) * (s + d)];
-    cx.beginPath(); cx.moveTo(a.wx, a.wz); cx.lineTo(p1[0], p1[1]); cx.lineTo(p2[0], p2[1]); cx.lineTo(best.wx, best.wz); cx.stroke();
-    if (rand() < 0.3) vias.push(p1);
-  });
-  const via = (x, z) => {
-    cx.fillStyle = padCol; cx.beginPath(); cx.arc(x, z, 0.017, 0, 6.2832); cx.fill();
-    cx.fillStyle = '#0a0a0a'; cx.beginPath(); cx.arc(x, z, 0.007, 0, 6.2832); cx.fill();
-  };
-  vias.forEach(v => via(v[0], v[1]));
-  for (let i = 0; i < 40; i++) { const a = i / 40 * 6.2832; via(R * 0.94 * Math.cos(a), R * 0.94 * Math.sin(a)); }   // edge stitching vias
-  comps.forEach(c => {                                             // pads
-    const sw = Math.abs(Math.cos(c.rot)) > 0.5;
-    cx.fillStyle = padCol;
-    padsOf(PAD_OF[c.type]).forEach(p => {
-      const [wx, wz] = rotW(c, p.x, p.z), w = sw ? p.w : p.h, h = sw ? p.h : p.w;
-      if (p.round) { cx.beginPath(); cx.arc(wx, wz, p.w / 2, 0, 6.2832); cx.fill(); cx.fillStyle = '#0a0a0a'; cx.beginPath(); cx.arc(wx, wz, 0.008, 0, 6.2832); cx.fill(); cx.fillStyle = padCol; }
-      else cx.fillRect(wx - w / 2, wz - h / 2, w, h);
+  for (k = 0; k < 4; k++) createTailFin(k * Math.PI / 2);
+  // steerFins(10) turns all four by 10 deg; steerFins([a, b, c, d]) sets each fin on its own
+  window.steerFins = function (deg) {
+    tailFins.forEach(function (st, i) {
+      var v = Array.isArray(deg) ? deg[i] : deg;
+      st.rotation.x = (v || 0) * Math.PI / 180;
     });
-  });
-  mounts.forEach(m => {                                            // mounting holes
-    cx.fillStyle = padCol; cx.beginPath(); cx.arc(m.x, m.z, 0.052, 0, 6.2832); cx.fill();
-    cx.fillStyle = '#050505'; cx.beginPath(); cx.arc(m.x, m.z, 0.028, 0, 6.2832); cx.fill();
-  });
-  /* silkscreen */
-  cx.strokeStyle = cx.fillStyle = '#eef0e6'; cx.lineWidth = 0.004;
-  const label = (txt, x, z, px) => { cx.save(); cx.translate(x, z); cx.scale(1 / k, 1 / k); cx.font = 'bold ' + px + 'px monospace'; cx.textAlign = 'center'; cx.fillText(txt, 0, 0); cx.restore(); };
-  const cnt2 = {};
-  comps.forEach(c => {
-    const o = OUTL[c.type];
-    cx.save(); cx.translate(c.x, c.z); cx.rotate(c.rot); cx.strokeRect(-o[0] / 2, -o[1] / 2, o[0], o[1]); cx.restore();
-    const key = REF[c.type]; cnt2[key] = (cnt2[key] || 0) + 1;
-    label(key + cnt2[key], c.x, c.z - CR[c.type] - 0.008, 14);
-  });
-  label(name, 0, R * 0.86, 20);
-  const tex = new THREE.CanvasTexture(cv);
-  tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
-  /* ---- board body + textured top ---- */
-  const sh = new THREE.Shape();
-  sh.absarc(0, 0, R, 0, Math.PI * 2, false);
-  const hl = new THREE.Path();
-  hl.absarc(0, 0, 0.07, 0, Math.PI * 2, true);
-  sh.holes.push(hl);
-  const bgeo = new THREE.ExtrudeGeometry(sh, { depth: 0.05, curveSegments: 96, bevelEnabled: false });
-  bgeo.translate(0, 0, -0.025);
-  bgeo.rotateX(-Math.PI / 2);
-  const board = new THREE.Mesh(bgeo, new THREE.MeshPhongMaterial({ color: new THREE.Color(mask).multiplyScalar(0.8), shininess: 40 }));
-  board.layers.set(1);
-  g.add(board);
-  const top = new THREE.Mesh(new THREE.RingGeometry(0.07, R, 128, 1), new THREE.MeshPhongMaterial({ map: tex, specular: 0x446655, shininess: 90 }));
-  top.rotation.x = -Math.PI / 2;
-  top.position.y = TY - 0.0005;
-  top.layers.set(1);
-  g.add(top);
-  /* ---- 3D parts ---- */
-  const resB = [], capB = [], ends = [], leads = [];
-  const inst = (geo, mat, items) => {
-    if (!items.length) return;
-    const m = new THREE.InstancedMesh(geo, mat, items.length);
-    items.forEach((it, i) => { D.position.set(it.x, it.y, it.z); D.rotation.set(0, it.ry, 0); D.updateMatrix(); m.setMatrixAt(i, D.matrix); });
-    m.layers.set(1);
-    g.add(m);
   };
-  const dotGeo = new THREE.CylinderGeometry(0.01, 0.01, 0.004, 10), pinGeo = new THREE.CylinderGeometry(0.008, 0.008, 0.1, 6);
-  comps.forEach(c => {
-    if (c.type === 'res' || c.type === 'cap') {
-      (c.type === 'res' ? resB : capB).push({ x: c.x, y: TY + 0.01, z: c.z, ry: -c.rot });
-      [-1, 1].forEach(s => { const [wx, wz] = rotW(c, s * 0.0295, 0); ends.push({ x: wx, y: TY + 0.0105, z: wz, ry: -c.rot }); });
-      return;
+
+  /* Landing legs: four copies of the same mechanism, 45 deg between the grid fins.
+     Each leg is an A-frame of two tapered struts with cross-braces, hinged at the root between two pylon plates.
+     The actuator sits in the middle plane, between the struts, and its rod-end eye is pinned on a cross axle
+     that spans the struts at the leg joint, so it is joined to the leg directly. */
+  function tube(parent, p1, p2, r, mat) {
+    var a = new THREE.Vector3(p1[0], p1[1], p1[2]), b = new THREE.Vector3(p2[0], p2[1], p2[2]);
+    var dir = b.clone().sub(a), len = dir.length();
+    var mm = new THREE.Mesh(new THREE.CylinderGeometry(r, r, len, 14), mat);
+    mm.position.copy(a.clone().add(b).multiplyScalar(0.5));
+    mm.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+    parent.add(mm);
+    return mm;
+  }
+  var core = M(0xc9a24a, 0.4, 0.6);
+  var legs = [];
+  var W0 = 0.30, W1 = 0.075;                                  // half-width of the A-frame at the hinge and at the foot
+  function wAt(y) { return W0 + (W1 - W0) * y / l; }
+  function createLeg(alpha) {
+    var g = new THREE.Group(); g.rotation.y = alpha; rocket.add(g);
+    var o = { plates: [], bplates: [] };
+    var hingeG = new THREE.Group(); g.add(hingeG);
+    [-1, 1].forEach(function (sg) {
+      var pl = new THREE.Mesh(new THREE.BoxGeometry(1, 0.36, 0.05), steel); pl.userData.sg = sg; hingeG.add(pl); o.plates.push(pl);
+      var bp = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 0.04), steel); bp.userData.sg = sg; g.add(bp); o.bplates.push(bp);
+    });
+    var hAxle = zCyl(0.06, 0.84, chrome); hingeG.add(hAxle);
+    // Leg
+    var arm = new THREE.Group(); hingeG.add(arm);
+    [-1, 1].forEach(function (sg) {
+      tube(arm, [0, 0, sg * W0], [0, l, sg * W1], 0.045, orange);
+      var eye = zCyl(0.1, 0.09, orange); eye.position.set(0, 0, sg * W0); arm.add(eye);
+    });
+    tube(arm, [0, 0.35, -wAt(0.35)], [0, 0.35, wAt(0.35)], 0.03, orange);
+    [1.85, 2.3].forEach(function (y) { tube(arm, [0, y, -wAt(y)], [0, y, wAt(y)], 0.03, orange); });
+    tube(arm, [0, 1.85, -wAt(1.85)], [0, 2.3, wAt(2.3)], 0.02, orange);
+    tube(arm, [0, 1.85, wAt(1.85)], [0, 2.3, -wAt(2.3)], 0.02, orange);
+    var axle = zCyl(0.04, 1, chrome); arm.add(axle);
+    // Foot: ball joint, crush core and a dished pad that lies flat at touchdown
+    var foot = new THREE.Group(); foot.position.set(0, l, 0); foot.rotation.z = thMax; arm.add(foot);
+    var ball = new THREE.Mesh(new THREE.SphereGeometry(0.11, 20, 14), steel);
+    var crush = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 0.24, 24), core); crush.position.y = -0.17;
+    var fpad = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.37, 0.06, 32), dark); fpad.position.y = -0.32;
+    foot.add(ball, crush, fpad);
+    // Actuator, in the middle plane
+    var act = new THREE.Group(); g.add(act);
+    var body = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.075, 1, 28), dark);
+    var motor = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.3, 28), steel); motor.position.y = 0.15;
+    var rod = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 1, 20), chrome);
+    var eyeA = zCyl(0.07, 0.12, chrome);
+    act.add(body, motor, rod, eyeA);
+    var bpin = zCyl(0.045, 0.36, chrome); g.add(bpin);
+    o.g = g; o.hingeG = hingeG; o.arm = arm; o.axle = axle; o.act = act; o.body = body; o.rod = rod; o.eyeA = eyeA; o.bpin = bpin;
+    legs.push(o);
+  }
+  for (k = 0; k < 4; k++) createLeg(Math.PI / 4 + k * Math.PI / 2);
+
+  rocket.traverse(function (o) { if (o.isMesh && o.material !== plumes[0].material && o.material !== plumes[1].material) o.castShadow = true; });
+
+  var bodyLen = 1, rodStart = 0.1;
+  function layout() {
+    var PX = PXof(), By = hingeY + c, BX = PX - s;
+    bodyLen = 0.95 * Lmin; rodStart = 0.1 * bodyLen;
+    legs.forEach(function (o) {
+      o.hingeG.position.set(PX, hingeY, 0);
+      o.plates.forEach(function (pl) {
+        pl.scale.x = s + 0.3; pl.position.set(-(s + 0.1) / 2, 0, pl.userData.sg * (W0 + 0.07));
+      });
+      o.bplates.forEach(function (bp) { bp.position.set(RB + 0.08, By, bp.userData.sg * 0.13); });
+      o.bpin.position.set(BX, By, 0);
+      o.act.position.set(BX, By, 0);
+      o.axle.position.set(0, d, 0); o.axle.scale.y = 2 * wAt(d) + 0.1;
+      o.body.scale.y = bodyLen; o.body.position.y = bodyLen / 2;
+    });
+  }
+  // The actuator length is the input. The leg angle is solved from it and every leg is posed from that.
+  function pose(x) {
+    var L = Lmin + x, th = thOf(L), PX = PXof(), BX = PX - s, By = hingeY + c;
+    var Ax = PX + d * Math.sin(th), Ay = hingeY + d * Math.cos(th);
+    var ang = Math.atan2(Ay - By, Ax - BX) - Math.PI / 2;
+    var rl = Math.max(0.02, L - rodStart);
+    legs.forEach(function (o) {
+      o.arm.rotation.z = -th;
+      o.act.rotation.z = ang;
+      o.rod.scale.y = rl; o.rod.position.y = rodStart + rl / 2;
+      o.eyeA.position.y = L;
+    });
+    return { L: L, th: th };
+  }
+
+  /* ---------- Orbit camera with presets ---------- */
+  var target = new THREE.Vector3(0, 11, 0);
+  var rad = 46, az = 0.9, pol = 1.4;
+  var goal = { az: 0.9, pol: 1.4, rad: 46, tx: 0, ty: 11, tz: 0, k: 0.5 }, animating = false;
+  var PRESET = {
+    whole: { az: 0.9, pol: 1.4, rad: 46, tx: 0, ty: 11, tz: 0, k: 0.5 },
+    leg: { az: Math.PI / 4, pol: 1.5, rad: 12.5, tx: 2.3 * Math.cos(Math.PI / 4), ty: 3.0, tz: -2.3 * Math.sin(Math.PI / 4), k: 1 }
+  };
+  function placeCam() {
+    camera.position.set(
+      target.x + rad * Math.sin(pol) * Math.sin(az),
+      target.y + rad * Math.cos(pol),
+      target.z + rad * Math.sin(pol) * Math.cos(az));
+    camera.lookAt(target);
+  }
+  var ptrs = new Map(), lastPinch = 0, cv = renderer.domElement;
+  cv.addEventListener('pointerdown', function (ev) { animating = false; cv.setPointerCapture(ev.pointerId); ptrs.set(ev.pointerId, ev); cv.style.cursor = 'grabbing'; });
+  cv.addEventListener('pointerup', function (ev) { ptrs.delete(ev.pointerId); lastPinch = 0; cv.style.cursor = 'grab'; });
+  cv.addEventListener('pointercancel', function (ev) { ptrs.delete(ev.pointerId); lastPinch = 0; });
+  cv.addEventListener('pointermove', function (ev) {
+    if (!ptrs.has(ev.pointerId)) return;
+    var prev = ptrs.get(ev.pointerId);
+    if (ptrs.size === 1) {
+      az -= (ev.clientX - prev.clientX) * 0.008;
+      pol = Math.max(0.2, Math.min(Math.PI - 0.2, pol - (ev.clientY - prev.clientY) * 0.008));
     }
-    const grp = new THREE.Group();
-    grp.position.set(c.x, TY, c.z); grp.rotation.y = -c.rot;
-    g.add(grp);
-    const m = (geo, mat, x, y, z) => { const o = new THREE.Mesh(geo, mat); o.position.set(x, y, z); o.layers.set(1); grp.add(o); return o; };
-    if (c.type === 'qfp') {
-      m(new THREE.BoxGeometry(.22, .03, .22), chipMat, 0, .019, 0);
-      m(dotGeo, silkMat, -.08, .036, -.08);
-      for (let sd = 0; sd < 4; sd++) for (let i = 0; i < 10; i++) {
-        const u = (i - 4.5) * .02, cs = Math.cos(sd * Math.PI / 2), sn = Math.sin(sd * Math.PI / 2), lz = .135;
-        const [wx, wz] = rotW(c, u * cs - lz * sn, u * sn + lz * cs);
-        leads.push({ x: wx, y: TY + .004, z: wz, ry: -(c.rot + (sd % 2) * Math.PI / 2) });
-      }
-    } else if (c.type === 'soic') {
-      m(new THREE.BoxGeometry(.13, .028, .09), chipMat, 0, .018, 0);
-      m(dotGeo, silkMat, -.05, .034, -.03);
-      [-1, 1].forEach(s => { for (let i = 0; i < 4; i++) { const [wx, wz] = rotW(c, (i - 1.5) * .03, s * .065); leads.push({ x: wx, y: TY + .004, z: wz, ry: -c.rot }); } });
-    } else if (c.type === 'xtal') {
-      m(new THREE.BoxGeometry(.12, .04, .05), steelMat, 0, .022, 0);
-    } else if (c.type === 'ecap') {
-      m(new THREE.BoxGeometry(.12, .012, .12), chipMat, 0, .006, 0);
-      m(new THREE.CylinderGeometry(.055, .055, .085, 24), capMat, 0, .0545, 0);
-      m(new THREE.CylinderGeometry(.05, .05, .006, 24), steelMat, 0, .0985, 0);
-    } else if (c.type === 'ind') {
-      m(new THREE.BoxGeometry(.1, .05, .1), ferriteMat, 0, .025, 0);
-    } else if (c.type === 'hdr') {
-      m(new THREE.BoxGeometry(.22, .04, .08), chipMat, 0, .02, 0);
-      for (let i = 0; i < 4; i++) [-1, 1].forEach(s => m(pinGeo, brassMat, (i - 1.5) * .05, .06, s * .025));
-    } else if (c.type === 'led') {
-      const o = m(new THREE.BoxGeometry(.045, .015, .03), ledMat, 0, .0085, 0);
-      o.layers.set(0); o.layers.enable(1);
+    ptrs.set(ev.pointerId, ev);
+    if (ptrs.size === 2) {
+      var a = Array.from(ptrs.values());
+      var dist = Math.hypot(a[0].clientX - a[1].clientX, a[0].clientY - a[1].clientY);
+      if (lastPinch) rad = Math.max(3, Math.min(90, rad * lastPinch / dist));
+      lastPinch = dist;
     }
   });
-  inst(new THREE.BoxGeometry(.05, .02, .035), chipMat, resB);
-  inst(new THREE.BoxGeometry(.05, .02, .035), resMat, capB);
-  inst(new THREE.BoxGeometry(.014, .021, .036), steelMat, ends);
-  inst(new THREE.BoxGeometry(.011, .008, .045), steelMat, leads);
-  return g;
-}
-[
-  makeBoard(BOARD_R[0], '#0c6a35', '#1c9150', 0, 11, { qfp: 1, hdr: 1, soic: 3, xtal: 1, ecap: 2, ind: 1, led: 3, res: 14, cap: 10 }, 'BR-01 REV.A'),
-  makeBoard(BOARD_R[1], '#0e3a8a', '#2a62c4', 1, 23, { qfp: 1, hdr: 1, soic: 2, xtal: 1, ecap: 2, ind: 2, led: 2, res: 11, cap: 8 }, 'BR-02 REV.B'),
-  makeBoard(BOARD_R[2], '#0c6a35', '#1c9150', 0, 37, { qfp: 2, hdr: 1, soic: 3, xtal: 1, ecap: 2, ind: 2, led: 3, res: 16, cap: 12 }, 'BR-03 REV.A')
-].forEach((bd, k) => {
-  bd.position.y = BOARD_Y0[k];
-  discs.add(bd);
-  addX(bd, E_BOARD[k]);
-});
+  cv.addEventListener('wheel', function (ev) {
+    ev.preventDefault(); animating = false;
+    rad = Math.max(3, Math.min(90, rad * (1 + ev.deltaY * 0.001)));
+  }, { passive: false });
+  function resize() {
+    var w = view.clientWidth, h = view.clientHeight;
+    if (!w || !h) return;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+  new ResizeObserver(resize).observe(view);
 
-/* two twisted-pair cables leave through the grommet: heat-shrink at the gland, strain relief near the plug, a connector on each */
-const tail = new THREE.Group();
-const gland = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.11, 0.1, 24), chipMat);
-gland.position.y = LOWER_BOTTOM - 0.05;
-gland.layers.set(1);
-tail.add(gland);
-const G = LOWER_BOTTOM - 0.02;
-const sleeveMat = new THREE.MeshPhongMaterial({ color: 0x111114, specular: 0x444444, shininess: 35, side: THREE.DoubleSide });
-const housings = [new THREE.MeshPhongMaterial({ color: 0xeeeee6, specular: 0x666666, shininess: 60 }), new THREE.MeshPhongMaterial({ color: 0x17181c, specular: 0x555555, shininess: 50 })];
-function sleeve(curve, t0, t1, rad) {
-  const pts = [];
-  for (let i = 0; i <= 12; i++) pts.push(curve.getPoint(t0 + (t1 - t0) * i / 12));
-  const m = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 24, rad, 12, false), sleeveMat);
-  m.layers.set(1);
-  tail.add(m);
-}
-function makeCable(th, cols, kind) {
-  const c = Math.cos(th), sn = -Math.sin(th);
-  const pts = [[0.03, 0], [0.04, -0.3], [0.15, -0.75], [0.5, -1.1], [1.0, -1.25], [1.5, -1.2]].map(([r, dy]) => new THREE.Vector3(r * c, G + dy, r * sn));
-  const curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
-  const N = 200, fr = curve.computeFrenetFrames(N, false), len = curve.getLength();
-  cols.forEach((col, w) => {                                    // two wires twisted around the cable axis
-    const wp = [];
-    for (let i = 0; i <= N; i++) {
-      const u = i / N, p = curve.getPoint(u), ang = u * len / 0.2 * Math.PI * 2 + w * Math.PI;
-      wp.push(p.addScaledVector(fr.normals[i], Math.cos(ang) * 0.03).addScaledVector(fr.binormals[i], Math.sin(ang) * 0.03));
-    }
-    const wire = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(wp), 300, 0.028, 10, false),
-      new THREE.MeshPhongMaterial({ color: col, specular: 0x888888, shininess: 80 }));
-    wire.layers.set(1);
-    tail.add(wire);
+  /* ---------- Landing sequence ---------- */
+  var $ = function (id) { return document.getElementById(id); };
+  var H0 = 10, hAlt = H0, x = 0, state = 'idle', tSeq = 0;
+  var tl = 3.0, Ttot = tl + T + 3.0;               // leg rods start at 3 s; touchdown 3 s after they finish
+  var goBtn = $('go');
+  goBtn.addEventListener('click', function () {
+    if (state === 'idle') { hAlt = H0; x = 0; tSeq = 0; state = 'land'; goBtn.textContent = 'Reset'; }
+    else { state = 'idle'; hAlt = H0; x = 0; goBtn.textContent = 'Land'; }
   });
-  sleeve(curve, 0, 0.14, 0.075);                                // heat-shrink at the gland
-  sleeve(curve, 0.9, 0.97, 0.062);                              // strain relief at the connector
-  const end = curve.getPoint(1), tan = curve.getTangent(1);
-  const cn = new THREE.Group();                                 // connector: local +z points along the cable
-  cn.position.copy(end);
-  cn.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), tan);
-  const part = (geo, mat, x, y, z) => { const o = new THREE.Mesh(geo, mat); o.position.set(x, y, z); o.layers.set(1); cn.add(o); return o; };
-  part(new THREE.BoxGeometry(0.15, 0.11, 0.2), housings[kind], 0, 0, 0.1);              // housing
-  part(new THREE.BoxGeometry(0.06, 0.02, 0.1), housings[kind], 0, 0.065, 0.09);         // latch
-  part(new THREE.BoxGeometry(0.15, 0.02, 0.03), housings[kind], 0, 0, 0.21);            // front lip
-  [-1, 1].forEach(s => {
-    if (kind === 0) part(new THREE.BoxGeometry(0.035, 0.035, 0.07), brassMat, s * 0.035, 0, 0.235);      // exposed male pins
-    else {
-      part(new THREE.CylinderGeometry(0.022, 0.022, 0.08, 14), steelMat, s * 0.035, 0, 0.24).rotation.x = Math.PI / 2;   // crimped ferrules
-      part(new THREE.BoxGeometry(0.05, 0.05, 0.03), housings[kind], s * 0.035, 0, 0.215);
+  function setCam(name) {
+    goal = PRESET[name]; animating = true;
+    $('camA').setAttribute('aria-pressed', name === 'whole'); $('camB').setAttribute('aria-pressed', name === 'leg');
+  }
+  $('camA').addEventListener('click', function () { setCam('whole'); });
+  $('camB').addEventListener('click', function () { setCam('leg'); });
+
+  var last = performance.now();
+  function frame(now) {
+    var dt = Math.min(0.05, (now - last) / 1000); last = now;
+    var burn = 0;
+    if (state === 'land') {
+      tSeq += dt;
+      hAlt = H0 * (1 - mj(tSeq / Ttot));
+      x = stroke * mj((tSeq - tl) / T);
+      burn = Math.max(0, Math.min(1, (Ttot - 0.3 - tSeq) / 0.4));
+      if (tSeq >= Ttot) { state = 'landed'; hAlt = 0; x = stroke; burn = 0; }
     }
-  });
-  tail.add(cn);
-}
-makeCable(0.4, [0xd62828, 0x15151a], 0);
-makeCable(0.4 + Math.PI * 0.8, [0xf2c230, 0x2a6fdb], 1);
-discs.add(tail);
-addX(tail, E_BOTTOM);
-
-function updateElectricity(now) { fillerGlowMat.uniforms.uTime.value = now; }
-ring.add(discs);
-
-let explodeTarget = 0, explodeNow = 0;
-addX(plate.children[0], E_PBASE);
-addX(plate.children[1], E_PTOP);
-for (let j = 2; j < 5; j++) {
-  const screw = plate.children[j];
-  addX(screw, E_SCREW);
-  addX(screw.children[3], E_TAB - E_SCREW);
-}
-addX(plate.children[5], E_CURING[0]);
-addX(plate.children[6], E_CURING[1]);
-function applyExplode(e) {
-  ring.position.y = E_RING * e;
-  windings.position.y = (E_WIND - E_RING) * e;
-  plate.position.y = -E_RING * e;
-  discs.position.y = -E_RING * e;
-  xItems.forEach(({ o, dy }) => { o.position.y = o.userData.y0 + dy * e; });
-  const postBot = FERRITE_TOP + E_FERRITE * e, postTop = POST_TOP + E_POST_TOP * e;
-  post.scale.y = (postTop - postBot) / POST_H;
-  post.position.y = (postTop + postBot) / 2;
-  explodeAmt = e;
-}
-
-const composer = new THREE.EffectComposer(renderer);
-composer.addPass(new THREE.RenderPass(scene, camera));
-const bloom = new THREE.UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 1.25, 0.75, 0.1);
-composer.addPass(bloom);
-
-const pivot = new THREE.Group();
-pivot.add(ring);
-pivot.name = 'Ring Object';
-scene.add(pivot);
-
-/* Input: drag rotate, pinch / wheel zoom, tap pause, triple-tap explode */
-const el = renderer.domElement;
-const pointers = new Map();
-let velX = 0, velY = 0, moved = 0, pinchStart = 0, zoomAtPinch = 1, spinning = true;
-let tapCount = 0, lastTap = 0, spinBefore = true;
-
-el.addEventListener('pointerdown', e => {
-  el.setPointerCapture(e.pointerId);
-  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-  el.style.cursor = 'grabbing';
-  if (pointers.size === 1) moved = 0;
-  if (pointers.size === 2) {
-    const [a, b] = [...pointers.values()];
-    pinchStart = Math.hypot(a.x - b.x, a.y - b.y);
-    zoomAtPinch = zoomTarget;
+    rocket.position.y = hAlt;
+    pose(x);
+    plumes.forEach(function (pm, i) {
+      pm.visible = burn > 0.01;
+      var fl = 1 + 0.1 * Math.sin(now * 0.06 + i * 2);
+      pm.scale.set(burn, burn * fl, burn);
+      pm.position.y = 0.65 - pm.userData.len * burn * fl / 2;
+    });
+    if (animating) {
+      az += (goal.az - az) * 0.08; pol += (goal.pol - pol) * 0.08; rad += (goal.rad - rad) * 0.08;
+      target.x += (goal.tx - target.x) * 0.1; target.z += (goal.tz - target.z) * 0.1;
+      if (Math.abs(goal.az - az) < 0.002 && Math.abs(goal.rad - rad) < 0.05) animating = false;
+    }
+    target.y += (goal.ty + goal.k * hAlt - target.y) * 0.25;
+    placeCam();
+    renderer.render(scene, camera);
+    requestAnimationFrame(frame);
   }
-});
-el.addEventListener('pointermove', e => {
-  const p = pointers.get(e.pointerId);
-  if (!p) return;
-  const dx = e.clientX - p.x, dy = e.clientY - p.y;
-  p.x = e.clientX; p.y = e.clientY;
-  if (pointers.size === 1) {
-    moved += Math.abs(dx) + Math.abs(dy);
-    velY = dx * 0.006; velX = dy * 0.006;
-    pivot.rotation.y += velY; pivot.rotation.x += velX;
-  } else if (pointers.size === 2) {
-    const [a, b] = [...pointers.values()];
-    zoomTarget = Math.min(2.2, Math.max(0.5, zoomAtPinch * pinchStart / Math.hypot(a.x - b.x, a.y - b.y)));
-    moved = 999;
-  }
-});
-function endPointer(e) {
-  const had = pointers.has(e.pointerId);
-  pointers.delete(e.pointerId);
-  el.style.cursor = 'grab';
-  if (had && pointers.size === 0 && moved < 6) {
-    const t = performance.now();
-    if (t - lastTap > 450) { tapCount = 0; spinBefore = spinning; }
-    tapCount++; lastTap = t;
-    if (tapCount === 3) {
-      explodeTarget = 1 - explodeTarget;
-      spinning = spinBefore;
-      tapCount = 0; lastTap = 0;
-    } else spinning = !spinning;
-  }
-}
-el.addEventListener('pointerup', endPointer);
-el.addEventListener('pointercancel', endPointer);
-el.addEventListener('wheel', e => {
-  e.preventDefault();
-  zoomTarget = Math.min(2.2, Math.max(0.5, zoomTarget * (1 + e.deltaY * 0.001)));
-}, { passive: false });
-addEventListener('resize', () => {
-  renderer.setSize(innerWidth, innerHeight);
-  composer.setSize(innerWidth, innerHeight);
-});
-
-let spinSpeed = 0;
-function animate() {
-  requestAnimationFrame(animate);
-  const now = performance.now() / 1000;
-  coreMat.uniforms.uIntensity.value = 1.0;
-  coreMat.uniforms.uTime.value = now;
-
-  spinSpeed += ((spinning ? 1 : 0) - spinSpeed) * 0.06;
-  ring.rotation.y += 0.004 * spinSpeed;
-
-  if (pointers.size === 0) {
-    pivot.rotation.y += velY; pivot.rotation.x += velX;
-    velX *= 0.94; velY *= 0.94;
-  }
-  explodeNow += (explodeTarget - explodeNow) * 0.07;
-  applyExplode(explodeNow * explodeNow * (3 - 2 * explodeNow));
-  setGhost(explodeNow > 0.02);
-  updateElectricity(now);
-  zoom += (zoomTarget - zoom) * 0.12;
-  placeCamera();
-  camera.layers.set(0);
-  composer.render();
-  camera.layers.set(1);
-  renderer.autoClear = false;
-  renderer.clearDepth();
-  renderer.render(scene, camera);
-  renderer.autoClear = true;
-}
-animate();
+  resize(); layout(); placeCam();
+  requestAnimationFrame(frame);
+})();
 </script>
+
 </body>
 </html>
