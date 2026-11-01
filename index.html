@@ -4,45 +4,26 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Landing Leg Rig</title>
-<meta name="claude:viewport-fit-sides" content="cover">
 <style>
-  /* Layout: one full-height 3D view with three buttons floating at the bottom. */
-  :root {
-    --bg: #eef0f2; --fg: #1b2127; --muted: #5b6670; --panel: #ffffff; --line: #cfd5da; --accent: #d9541e;
-    --mono: ui-monospace, Menlo, Consolas, monospace;
-    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  }
+  :root { --bg:#eef0f2; --fg:#1b2127; --panel:#fff; --line:#cfd5da; --accent:#d9541e;
+    --mono:ui-monospace,Menlo,Consolas,monospace; --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
   @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg: #14181c; --fg: #e6eaee; --muted: #9aa5af; --panel: #1d2329; --line: #323b43; --accent: #ff7a3d;
-      color-scheme: dark;
-    }
+    :root:not([data-theme="light"]) { --bg:#14181c; --fg:#e6eaee; --panel:#1d2329; --line:#323b43; --accent:#ff7a3d; color-scheme:dark; }
   }
-  :root[data-theme="dark"] {
-    --bg: #14181c; --fg: #e6eaee; --muted: #9aa5af; --panel: #1d2329; --line: #323b43; --accent: #ff7a3d;
-    color-scheme: dark;
-  }
-  html, body { height: 100%; }
-  body {
-    background: var(--bg); color: var(--fg); font-family: var(--sans);
-    padding-left: max(16px, env(safe-area-inset-left, 0px));
-    padding-right: max(16px, env(safe-area-inset-right, 0px));
-    padding-block: 12px;
-    display: flex; flex-direction: column;
-  }
-  #view { flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; position: relative; }
-  #view canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
-  #hint { position: absolute; left: 10px; top: 8px; font: 12px var(--mono); color: #e8edf0; text-shadow: 0 1px 2px rgba(0,0,0,.6); pointer-events: none; }
-  #bar { position: absolute; left: 12px; right: 12px; bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
-  button {
-    font: 500 14px var(--sans); color: var(--fg); background: var(--panel); border: 1px solid var(--line);
-    border-radius: 4px; padding: 9px 16px; cursor: pointer;
-  }
-  button.primary { color: #fff; background: var(--accent); border-color: var(--accent); min-width: 88px; }
-  button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
-  button:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+  :root[data-theme="dark"] { --bg:#14181c; --fg:#e6eaee; --panel:#1d2329; --line:#323b43; --accent:#ff7a3d; color-scheme:dark; }
+  html, body { height:100%; }
+  body { margin:0; font-size:14px; background:var(--bg); color:var(--fg); font-family:var(--sans);
+    padding-left:max(16px, env(safe-area-inset-left,0px)); padding-right:max(16px, env(safe-area-inset-right,0px));
+    padding-block:12px; display:flex; flex-direction:column; box-sizing:border-box; }
+  #view { flex:1; min-height:0; border:1px solid var(--line); border-radius:6px; overflow:hidden; position:relative; }
+  #view canvas { display:block; width:100%; height:100%; touch-action:none; cursor:grab; }
+  #hint { position:absolute; left:10px; top:8px; font:12px var(--mono); color:#e8edf0; text-shadow:0 1px 2px rgba(0,0,0,.6); pointer-events:none; }
+  #bar { position:absolute; left:12px; right:12px; bottom:12px; display:flex; gap:8px; flex-wrap:wrap; justify-content:center; }
+  button { font:500 14px var(--sans); color:var(--fg); background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:9px 16px; cursor:pointer; }
+  button.primary { color:#fff; background:var(--accent); border-color:var(--accent); min-width:88px; }
+  button[aria-pressed="true"] { border-color:var(--accent); color:var(--accent); }
+  button:focus-visible { outline:2px solid var(--fg); outline-offset:2px; }
 </style>
-<style>body { margin: 0; font-size: 14px; } [hidden] { display: none !important; }</style>
 </head>
 <body>
 <div id="view">
@@ -53,36 +34,30 @@
     <button id="camB" type="button" aria-pressed="false">Leg close-up</button>
   </div>
 </div>
-
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 (function () {
-  /* ---------- Leg mechanism (SI units, 1 scene unit = 1 m) ----------
-     Hinge P on the body. The body joint B sits c above P and s inboard of it (toward the body).
-     The leg joint A sits ON the leg axis, d out from P, so the rod end is pinned straight to the leg:
-       A = P + d (sin(theta), cos(theta)),   B = P + (-s, c),   theta measured from straight up, outward positive.
-     The actuator is the only input. Its length L = |A - B| is set, and the leg angle follows from the triangle P-B-A:
-       L^2 = d^2 + rB^2 - 2 d rB cos(theta + beta),   rB = hypot(s, c),   beta = atan2(s, c)
-       theta = acos((d^2 + rB^2 - L^2) / (2 d rB)) - beta.
-     The standoff s keeps B off the leg line when stowed, so the actuator has leverage from the first millimetre. */
-  var l = 2.6;                                     // leg length
-  var RB = 1.0;                                    // booster radius
-  var thMax = 141.33 * Math.PI / 180;              // leg angle at touchdown
-  var hingeY = 0.35 - l * Math.cos(thMax);         // hinge height when landed: the foot ball joint sits 0.35 m above a flat pad
-  var d = 1.0, s = 0.4, c = 2.9;
-  var T = 2.5;                                     // leg deploy time
+  /* Leg mechanism (1 unit = 1 m). Hinge P on the body; body joint B is c above P and s inboard;
+     leg joint A is on the leg axis, d out from P. Actuator length L = |A-B| is the only input:
+     theta = acos((d^2 + rB^2 - L^2) / (2 d rB)) - beta.
+     Restyled after the reference: the strut now anchors high on the body (large c) and
+     meets the leg low (large d), like the black telescoping struts in the photo. */
+  var l = 4.5, RB = 1.0;
+  var thMax = 112 * Math.PI / 180;
+  var hingeY = 0;                                    // set from the leg geometry below
+  var d = 2.8, s = 0.12, c = 2.2;
+  var T = 1.2;
   var rB = Math.hypot(s, c), beta = Math.atan2(s, c);
 
-  function PXof() { return RB + s + 0.15; }       // hinge distance from the booster axis
+  function PXof() { return RB + 0.12; }
   function Lof(th) { return Math.sqrt(d * d + rB * rB - 2 * d * rB * Math.cos(th + beta)); }
   function thOf(L) { var cp = (d * d + rB * rB - L * L) / (2 * d * rB); return Math.acos(Math.max(-1, Math.min(1, cp))) - beta; }
-  function mj(u) { u = Math.max(0, Math.min(1, u)); return u * u * u * (10 - 15 * u + 6 * u * u); }  // min-jerk 0..1
+  function mj(u) { u = Math.max(0, Math.min(1, u)); return u * u * u * (10 - 15 * u + 6 * u * u); }
   var Lmin = Lof(0), Lmax = Lof(thMax), stroke = Lmax - Lmin;
 
-  /* ---------- Scene ---------- */
   var view = document.getElementById('view');
   var scene = new THREE.Scene();
-  var camera = new THREE.PerspectiveCamera(40, 1, 0.5, 400);
+  var camera = new THREE.PerspectiveCamera(40, 1, 1, 30000);
   var renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.shadowMap.enabled = true;
@@ -97,41 +72,54 @@
   sun.shadow.bias = -0.0006;
   scene.add(sun);
 
+  // Space: sky fades to black with altitude, stars follow the camera, a planet sits below
+  var cssBg = new THREE.Color(getComputedStyle(document.body).backgroundColor), spaceCol = new THREE.Color(0x01030a);
+  scene.background = cssBg.clone();
+  var i, starPos = new Float32Array(1800 * 3);
+  for (i = 0; i < 1800; i++) { var u1 = Math.random() * 2 - 1, a1 = Math.random() * 6.2832, r1 = Math.sqrt(1 - u1 * u1); starPos[i * 3] = 3000 * r1 * Math.cos(a1); starPos[i * 3 + 1] = 3000 * u1; starPos[i * 3 + 2] = 3000 * r1 * Math.sin(a1); }
+  var starGeo = new THREE.BufferGeometry(); starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+  var starMat = new THREE.PointsMaterial({ color: 0xffffff, size: 2, sizeAttenuation: false, transparent: true, depthWrite: false, fog: false });
+  var stars = new THREE.Points(starGeo, starMat); stars.frustumCulled = false; scene.add(stars);
+  var tc = document.createElement('canvas'); tc.width = 512; tc.height = 256;
+  var tcx = tc.getContext('2d'); tcx.fillStyle = '#1d4f91'; tcx.fillRect(0, 0, 512, 256);
+  for (i = 0; i < 70; i++) { tcx.fillStyle = i % 3 ? '#3f7a45' : '#d9d2b0'; tcx.beginPath(); tcx.ellipse(Math.random() * 512, Math.random() * 256, 12 + Math.random() * 40, 8 + Math.random() * 22, Math.random() * 3, 0, 6.3); tcx.fill(); }
+  for (i = 0; i < 60; i++) { tcx.fillStyle = 'rgba(255,255,255,0.55)'; tcx.beginPath(); tcx.ellipse(Math.random() * 512, Math.random() * 256, 20 + Math.random() * 50, 4 + Math.random() * 8, Math.random() * 3, 0, 6.3); tcx.fill(); }
+  var earth = new THREE.Mesh(new THREE.SphereGeometry(60000, 96, 48), new THREE.MeshStandardMaterial({ map: new THREE.CanvasTexture(tc), roughness: 1, metalness: 0, transparent: true }));
+  earth.position.y = -60001; scene.add(earth);
+
   var M = function (col, mt, r) { return new THREE.MeshStandardMaterial({ color: col, metalness: mt, roughness: r, side: THREE.DoubleSide }); };
   var white = M(0xe9edef, 0.1, 0.5), black = M(0x1c1f22, 0.3, 0.6), soot = M(0x34383c, 0.2, 0.8),
-      steel = M(0x4a5560, 0.6, 0.45), orange = M(0xe0652a, 0.2, 0.55), chrome = M(0xd5dade, 0.9, 0.25),
-      dark = M(0x23282d, 0.5, 0.5), ti = M(0x8d9398, 0.8, 0.4), nozzle = M(0x2f3338, 0.7, 0.4), skirt = M(0x575d63, 0.5, 0.6);
+      steel = M(0x4a5560, 0.6, 0.45), legW = M(0x16191c, 0.35, 0.5), chrome = M(0xd5dade, 0.9, 0.25),
+      dark = M(0x23282d, 0.5, 0.5), ti = M(0x8d9398, 0.8, 0.4), nozzle = M(0x2f3338, 0.7, 0.4), skirt = M(0x575d63, 0.5, 0.6),
+      strutB = M(0x3b4249, 0.5, 0.45);
 
-  // Landing pad
-  var pad0 = new THREE.Mesh(new THREE.CircleGeometry(40, 64), M(0x80868b, 0.0, 0.95));
+  var pad0 = new THREE.Mesh(new THREE.CircleGeometry(40, 64), M(0x80868b, 0, 0.95));
   pad0.rotation.x = -Math.PI / 2; pad0.position.y = -0.02; pad0.receiveShadow = true; scene.add(pad0);
-  var padC = new THREE.Mesh(new THREE.CircleGeometry(8, 64), M(0xa9aeb2, 0.0, 0.9));
+  var padC = new THREE.Mesh(new THREE.CircleGeometry(8, 64), M(0xa9aeb2, 0, 0.9));
   padC.rotation.x = -Math.PI / 2; padC.position.y = -0.01; padC.receiveShadow = true; scene.add(padC);
   var padRing = new THREE.Mesh(new THREE.RingGeometry(6.6, 6.8, 64), new THREE.MeshBasicMaterial({ color: 0xf2f2f0 }));
-  padRing.rotation.x = -Math.PI / 2; padRing.position.y = 0.0; scene.add(padRing);
+  padRing.rotation.x = -Math.PI / 2; scene.add(padRing);
   [Math.PI / 4, -Math.PI / 4].forEach(function (a) {
     var bar = new THREE.Mesh(new THREE.PlaneGeometry(13, 0.45), new THREE.MeshBasicMaterial({ color: 0xf2f2f0 }));
-    bar.rotation.x = -Math.PI / 2; bar.rotation.z = a; bar.position.y = 0.0; scene.add(bar);
+    bar.rotation.x = -Math.PI / 2; bar.rotation.z = a; scene.add(bar);
   });
 
-  // Rocket group: origin at the pad when landed
   var rocket = new THREE.Group();
   scene.add(rocket);
   function cyl(rt, rb, h, y, mat, seg) {
     var mm = new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, seg || 48), mat);
     mm.position.y = y; rocket.add(mm); return mm;
   }
-  cyl(RB, RB, 11.1, 1.9 + 11.1 / 2, white);                // first stage tank, y 1.9 to 13.0
-  cyl(RB + 0.004, RB + 0.004, 1.1, 1.9 + 0.55, soot);       // sooted base
+  cyl(RB, RB, 11.1, 1.9 + 11.1 / 2, white);
+  cyl(RB + 0.004, RB + 0.004, 1.1, 1.9 + 0.55, soot);
   [4.4, 6.9, 9.4, 11.6].forEach(function (y) { cyl(RB + 0.006, RB + 0.006, 0.04, y, dark); });
-  cyl(RB + 0.002, RB + 0.002, 1.4, 13.7, black);            // interstage, y 13.0 to 14.4
-  cyl(RB, RB, 4.0, 16.4, white);                            // second stage, y 14.4 to 18.4
+  cyl(RB + 0.002, RB + 0.002, 1.4, 13.7, black);
+  cyl(RB, RB, 4.0, 16.4, white);
   cyl(RB + 0.004, RB + 0.004, 0.05, 14.45, dark);
   var pts = [], k;
   for (k = 0; k <= 28; k++) { var su = k / 28; pts.push(new THREE.Vector2(RB * Math.sqrt(Math.max(0, 1 - Math.pow(su, 1.8))), 18.4 + 4.2 * su)); }
-  var fairing = new THREE.Mesh(new THREE.LatheGeometry(pts, 48), white);
-  rocket.add(fairing);
-  cyl(0.97, 0.97, 0.4, 1.7, skirt);                         // engine skirt
+  rocket.add(new THREE.Mesh(new THREE.LatheGeometry(pts, 48), white));
+  cyl(0.97, 0.97, 0.4, 1.7, skirt);
   var nz = [[0, 0]];
   for (k = 0; k < 8; k++) nz.push([0.6 * Math.cos(k * Math.PI / 4), 0.6 * Math.sin(k * Math.PI / 4)]);
   nz.forEach(function (p) {
@@ -152,9 +140,6 @@
     return mm;
   }
 
-  /* Fins: four small swept fins at the top of the first stage, exactly where the grid fins were.
-     Each fin is an all-moving surface on a radial shaft, so it can be steered about its own mid-chord.
-     They sit at neutral for now; steerFins() turns them (degrees). */
   var tailFins = [];
   function createTailFin(az) {
     var g = new THREE.Group(); g.rotation.y = az; g.position.y = 13.85; rocket.add(g);
@@ -163,25 +148,16 @@
     sh.moveTo(0, 0.6); sh.lineTo(0.7, -0.05); sh.lineTo(0.7, -0.6); sh.lineTo(0, -0.6); sh.lineTo(0, 0.6);
     var geo = new THREE.ExtrudeGeometry(sh, { depth: 0.06, bevelEnabled: false });
     geo.translate(0, 0, -0.03);
-    var blade = new THREE.Mesh(geo, ti);
     var shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.3, 16), chrome);
     shaft.rotation.z = Math.PI / 2; shaft.position.x = 0.1;
-    steer.add(blade, shaft);
+    steer.add(new THREE.Mesh(geo, ti), shaft);
     tailFins.push(steer);
   }
   for (k = 0; k < 4; k++) createTailFin(k * Math.PI / 2);
-  // steerFins(10) turns all four by 10 deg; steerFins([a, b, c, d]) sets each fin on its own
   window.steerFins = function (deg) {
-    tailFins.forEach(function (st, i) {
-      var v = Array.isArray(deg) ? deg[i] : deg;
-      st.rotation.x = (v || 0) * Math.PI / 180;
-    });
+    tailFins.forEach(function (st, i) { st.rotation.x = ((Array.isArray(deg) ? deg[i] : deg) || 0) * Math.PI / 180; });
   };
 
-  /* Landing legs: four copies of the same mechanism, 45 deg between the grid fins.
-     Each leg is an A-frame of two tapered struts with cross-braces, hinged at the root between two pylon plates.
-     The actuator sits in the middle plane, between the struts, and its rod-end eye is pinned on a cross axle
-     that spans the struts at the leg joint, so it is joined to the leg directly. */
   function tube(parent, p1, p2, r, mat) {
     var a = new THREE.Vector3(p1[0], p1[1], p1[2]), b = new THREE.Vector3(p2[0], p2[1], p2[2]);
     var dir = b.clone().sub(a), len = dir.length();
@@ -193,42 +169,52 @@
   }
   var core = M(0xc9a24a, 0.4, 0.6);
   var legs = [];
-  var W0 = 0.30, W1 = 0.075;                                  // half-width of the A-frame at the hinge and at the foot
-  function wAt(y) { return W0 + (W1 - W0) * y / l; }
+  /* Arrow-head leg, pointing outward: the notched base is at the hinge and the apex is the free foot.
+     The two pointed corners of the base are pinned straight onto the hinge pin, with no brackets or plates.
+     A raised spine runs from the apex to the notch vertex and bulges outward; the flanks wrap down onto the tank
+     and shroud the actuator. */
+  var Wb = 0.8, nN = 0.3 * l, yM = 0.58 * l, Mx = 0.42, Nx = 0.36, apX = -0.17;
+  function bodyX(z) { return -0.12 + Math.sqrt(RB * RB - z * z) - RB; }   // tank surface relative to the hinge
+  var arrowGeo = (function () {
+    var wE = Wb * (l - yM) / l;
+    var A0 = [apX, l, 0], Mv = [Mx, yM, 0], Nv = [Nx, nN, 0], E = [bodyX(wE), yM, wE], C = [0, 0, Wb];
+    var tris = [[A0, E, Mv], [Mv, E, Nv], [Nv, E, C]], p = [];
+    [1, -1].forEach(function (sg) {
+      tris.forEach(function (t) {
+        (sg > 0 ? t : [t[0], t[2], t[1]]).forEach(function (v) { p.push(v[0], v[1], v[2] * sg); });
+      });
+    });
+    var g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(p, 3));
+    g.computeVertexNormals();
+    return g;
+  })();
+  (function () {   // the lowest point of the leg sets the hinge height, so the tip just touches the pad when landed
+    var pa = arrowGeo.attributes.position, m = 1e9, j;
+    for (j = 0; j < pa.count; j++) m = Math.min(m, -pa.getX(j) * Math.sin(thMax) + pa.getY(j) * Math.cos(thMax));
+    hingeY = 0.03 - m;
+  })();
   function createLeg(alpha) {
     var g = new THREE.Group(); g.rotation.y = alpha; rocket.add(g);
-    var o = { plates: [], bplates: [] };
+    var o = {};
     var hingeG = new THREE.Group(); g.add(hingeG);
-    [-1, 1].forEach(function (sg) {
-      var pl = new THREE.Mesh(new THREE.BoxGeometry(1, 0.36, 0.05), steel); pl.userData.sg = sg; hingeG.add(pl); o.plates.push(pl);
-      var bp = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 0.04), steel); bp.userData.sg = sg; g.add(bp); o.bplates.push(bp);
-    });
-    var hAxle = zCyl(0.06, 0.84, chrome); hingeG.add(hAxle);
-    // Leg
+    hingeG.add(zCyl(0.05, 2 * Wb, chrome));   // hinge pin, running exactly corner to corner
     var arm = new THREE.Group(); hingeG.add(arm);
+    arm.add(new THREE.Mesh(arrowGeo, legW));
     [-1, 1].forEach(function (sg) {
-      tube(arm, [0, 0, sg * W0], [0, l, sg * W1], 0.045, orange);
-      var eye = zCyl(0.1, 0.09, orange); eye.position.set(0, 0, sg * W0); arm.add(eye);
+      tube(arm, [apX, l, 0], [0, 0, sg * Wb], 0.04, legW);
+      tube(arm, [Nx, nN, 0], [0, 0, sg * Wb], 0.04, legW);
     });
-    tube(arm, [0, 0.35, -wAt(0.35)], [0, 0.35, wAt(0.35)], 0.03, orange);
-    [1.85, 2.3].forEach(function (y) { tube(arm, [0, y, -wAt(y)], [0, y, wAt(y)], 0.03, orange); });
-    tube(arm, [0, 1.85, -wAt(1.85)], [0, 2.3, wAt(2.3)], 0.02, orange);
-    tube(arm, [0, 1.85, wAt(1.85)], [0, 2.3, -wAt(2.3)], 0.02, orange);
-    var axle = zCyl(0.04, 1, chrome); arm.add(axle);
-    // Foot: ball joint, crush core and a dished pad that lies flat at touchdown
-    var foot = new THREE.Group(); foot.position.set(0, l, 0); foot.rotation.z = thMax; arm.add(foot);
-    var ball = new THREE.Mesh(new THREE.SphereGeometry(0.11, 20, 14), steel);
-    var crush = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 0.24, 24), core); crush.position.y = -0.17;
-    var fpad = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.37, 0.06, 32), dark); fpad.position.y = -0.32;
-    foot.add(ball, crush, fpad);
-    // Actuator, in the middle plane
+    tube(arm, [apX, l, 0], [Mx, yM, 0], 0.05, legW);
+    tube(arm, [Mx, yM, 0], [Nx, nN, 0], 0.05, legW);
+    var axle = zCyl(0.04, 0.24, chrome); arm.add(axle);
     var act = new THREE.Group(); g.add(act);
-    var body = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.075, 1, 28), dark);
-    var motor = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.3, 28), steel); motor.position.y = 0.15;
+    var body = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.085, 1, 28), strutB);
+    var motor = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.3, 28), steel); motor.position.y = 0.15;
     var rod = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 1, 20), chrome);
     var eyeA = zCyl(0.07, 0.12, chrome);
     act.add(body, motor, rod, eyeA);
-    var bpin = zCyl(0.045, 0.36, chrome); g.add(bpin);
+    var bpin = zCyl(0.045, 0.16, chrome); g.add(bpin);
     o.g = g; o.hingeG = hingeG; o.arm = arm; o.axle = axle; o.act = act; o.body = body; o.rod = rod; o.eyeA = eyeA; o.bpin = bpin;
     legs.push(o);
   }
@@ -236,23 +222,35 @@
 
   rocket.traverse(function (o) { if (o.isMesh && o.material !== plumes[0].material && o.material !== plumes[1].material) o.castShadow = true; });
 
+  // Company name: large letters stacked vertically on the tank, above the stowed legs
+  var CW = 360, CH = 520, letters = 'QUARKS';
+  var lc = document.createElement('canvas'); lc.width = CW; lc.height = CH * letters.length;
+  var lx = lc.getContext('2d'); lx.fillStyle = '#0a2447'; lx.font = '900 400px system-ui, Arial, sans-serif'; lx.textAlign = 'center'; lx.textBaseline = 'middle';
+  for (var q = 0; q < letters.length; q++) lx.fillText(letters[q], CW / 2, CH * q + CH / 2 + 12);
+  var nameTex = new THREE.CanvasTexture(lc); nameTex.generateMipmaps = false; nameTex.minFilter = THREE.LinearFilter;
+  var nameArc = 0.89, nameH = 7.8;
+  var nameMesh = new THREE.Mesh(new THREE.CylinderGeometry(RB + 0.012, RB + 0.012, nameH, 48, 1, true, Math.PI / 2 - nameArc / 2, nameArc),
+    new THREE.MeshBasicMaterial({ map: nameTex, transparent: true, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
+  nameMesh.position.y = 12.8 - nameH / 2; rocket.add(nameMesh);
+
+  // Reentry plasma glow, shown only during the fall
+  var glowMat = new THREE.MeshBasicMaterial({ color: 0xff7a2a, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+  var glow1 = new THREE.Mesh(new THREE.SphereGeometry(1.9, 24, 14), glowMat); glow1.scale.set(1, 0.8, 1); glow1.position.y = 0.9;
+  var glow2 = new THREE.Mesh(new THREE.ConeGeometry(1.5, 15, 24, 1, true), glowMat); glow2.position.y = 8.2;
+  rocket.add(glow1, glow2); glow1.visible = glow2.visible = false;
+
   var bodyLen = 1, rodStart = 0.1;
   function layout() {
     var PX = PXof(), By = hingeY + c, BX = PX - s;
     bodyLen = 0.95 * Lmin; rodStart = 0.1 * bodyLen;
     legs.forEach(function (o) {
       o.hingeG.position.set(PX, hingeY, 0);
-      o.plates.forEach(function (pl) {
-        pl.scale.x = s + 0.3; pl.position.set(-(s + 0.1) / 2, 0, pl.userData.sg * (W0 + 0.07));
-      });
-      o.bplates.forEach(function (bp) { bp.position.set(RB + 0.08, By, bp.userData.sg * 0.13); });
       o.bpin.position.set(BX, By, 0);
       o.act.position.set(BX, By, 0);
-      o.axle.position.set(0, d, 0); o.axle.scale.y = 2 * wAt(d) + 0.1;
+      o.axle.position.set(0, d, 0);
       o.body.scale.y = bodyLen; o.body.position.y = bodyLen / 2;
     });
   }
-  // The actuator length is the input. The leg angle is solved from it and every leg is posed from that.
   function pose(x) {
     var L = Lmin + x, th = thOf(L), PX = PXof(), BX = PX - s, By = hingeY + c;
     var Ax = PX + d * Math.sin(th), Ay = hingeY + d * Math.cos(th);
@@ -264,22 +262,18 @@
       o.rod.scale.y = rl; o.rod.position.y = rodStart + rl / 2;
       o.eyeA.position.y = L;
     });
-    return { L: L, th: th };
   }
 
-  /* ---------- Orbit camera with presets ---------- */
   var target = new THREE.Vector3(0, 11, 0);
-  var rad = 46, az = 0.9, pol = 1.4;
-  var goal = { az: 0.9, pol: 1.4, rad: 46, tx: 0, ty: 11, tz: 0, k: 0.5 }, animating = false;
+  var rad = 46, az = Math.PI / 2, pol = 1.4;
+  var goal = null, animating = false;
   var PRESET = {
-    whole: { az: 0.9, pol: 1.4, rad: 46, tx: 0, ty: 11, tz: 0, k: 0.5 },
-    leg: { az: Math.PI / 4, pol: 1.5, rad: 12.5, tx: 2.3 * Math.cos(Math.PI / 4), ty: 3.0, tz: -2.3 * Math.sin(Math.PI / 4), k: 1 }
+    whole: { az: Math.PI / 2, pol: 1.4, rad: 46, tx: 0, ty: 11, tz: 0, k: 0.5 },
+    leg: { az: Math.PI / 4, pol: 1.5, rad: 14, tx: 2 * Math.cos(Math.PI / 4), ty: 3.5, tz: -2 * Math.sin(Math.PI / 4), k: 1 }
   };
+  goal = PRESET.whole;
   function placeCam() {
-    camera.position.set(
-      target.x + rad * Math.sin(pol) * Math.sin(az),
-      target.y + rad * Math.cos(pol),
-      target.z + rad * Math.sin(pol) * Math.cos(az));
+    camera.position.set(target.x + rad * Math.sin(pol) * Math.sin(az), target.y + rad * Math.cos(pol), target.z + rad * Math.sin(pol) * Math.cos(az));
     camera.lookAt(target);
   }
   var ptrs = new Map(), lastPinch = 0, cv = renderer.domElement;
@@ -314,14 +308,15 @@
   }
   new ResizeObserver(resize).observe(view);
 
-  /* ---------- Landing sequence ---------- */
   var $ = function (id) { return document.getElementById(id); };
-  var H0 = 10, hAlt = H0, x = 0, state = 'idle', tSeq = 0;
-  var tl = 3.0, Ttot = tl + T + 3.0;               // leg rods start at 3 s; touchdown 3 s after they finish
+  /* Descent timeline (s): orbit, flip to engines-first, reentry fall, landing burn with leg deploy, soft touchdown */
+  var HORB = 6000, tOrb = 2.5, tFlip = 4.5, tEnt = 10.5, tBurn = 14.0, tSoft = 17.0, tLeg = 12.0;
+  var H0 = HORB, hAlt = H0, x = 0, state = 'idle', tSeq = 0, pitch = Math.PI / 2;
+  function startPose() { hAlt = HORB; x = 0; pitch = Math.PI / 2; }
   var goBtn = $('go');
   goBtn.addEventListener('click', function () {
-    if (state === 'idle') { hAlt = H0; x = 0; tSeq = 0; state = 'land'; goBtn.textContent = 'Reset'; }
-    else { state = 'idle'; hAlt = H0; x = 0; goBtn.textContent = 'Land'; }
+    if (state === 'idle') { startPose(); tSeq = 0; state = 'land'; goBtn.textContent = 'Reset'; }
+    else { state = 'idle'; startPose(); steerFins(0); goBtn.textContent = 'Land'; }
   });
   function setCam(name) {
     goal = PRESET[name]; animating = true;
@@ -333,15 +328,29 @@
   var last = performance.now();
   function frame(now) {
     var dt = Math.min(0.05, (now - last) / 1000); last = now;
-    var burn = 0;
+    var burn = 0, glow = 0;
     if (state === 'land') {
       tSeq += dt;
-      hAlt = H0 * (1 - mj(tSeq / Ttot));
-      x = stroke * mj((tSeq - tl) / T);
-      burn = Math.max(0, Math.min(1, (Ttot - 0.3 - tSeq) / 0.4));
-      if (tSeq >= Ttot) { state = 'landed'; hAlt = 0; x = stroke; burn = 0; }
+      var t = tSeq, u;
+      if (t < tFlip) hAlt = HORB - 600 * Math.pow(t / tFlip, 2);
+      else if (t < tEnt) { u = (t - tFlip) / (tEnt - tFlip); hAlt = 5400 - 4700 * Math.pow(u, 1.3); }
+      else if (t < tBurn) { u = (t - tEnt) / (tBurn - tEnt); hAlt = 10 + 690 * Math.pow(1 - u, 3); }
+      else hAlt = 10 * (1 - mj((t - tBurn) / (tSoft - tBurn)));
+      pitch = (Math.PI / 2) * (1 - mj((t - tOrb) / (tFlip - tOrb)));
+      x = stroke * mj((t - tLeg) / T);
+      if (t > tFlip && t < tEnt) glow = Math.sin(Math.PI * (t - tFlip) / (tEnt - tFlip));
+      if (t >= tEnt) burn = Math.max(0, Math.min(1, (tSoft - 0.3 - t) / 0.4));
+      steerFins(t > tFlip && t < tBurn ? 6 * Math.sin(t * 5) : 0);
+      if (t >= tSoft) { state = 'landed'; hAlt = 0; x = stroke; burn = 0; steerFins(0); }
     }
-    rocket.position.y = hAlt;
+    rocket.position.y = hAlt; rocket.rotation.z = pitch;
+    glowMat.opacity = 0.55 * glow; glow1.visible = glow2.visible = glow > 0.01;
+    var sp = Math.max(0, Math.min(1, (hAlt - 300) / 2500));   // 0 near the ground, 1 in space
+    scene.background.copy(cssBg).lerp(spaceCol, sp);
+    starMat.opacity = Math.max(0, (sp - 0.35) / 0.65); stars.visible = starMat.opacity > 0.01;
+    stars.position.copy(camera.position);
+    earth.visible = sp > 0.02; earth.material.opacity = Math.min(1, sp * 3);
+    earth.rotation.z -= dt * 0.02 * sp;
     pose(x);
     plumes.forEach(function (pm, i) {
       pm.visible = burn > 0.01;
@@ -354,7 +363,11 @@
       target.x += (goal.tx - target.x) * 0.1; target.z += (goal.tz - target.z) * 0.1;
       if (Math.abs(goal.az - az) < 0.002 && Math.abs(goal.rad - rad) < 0.05) animating = false;
     }
-    target.y += (goal.ty + goal.k * hAlt - target.y) * 0.25;
+    var kE = goal.k + (1 - goal.k) * Math.max(0, Math.min(1, (hAlt - 20) / 60));
+    var dY = goal.ty + kE * hAlt, dX = goal.tx, f = hAlt > 30 ? 1 : 0.25;
+    if (goal === PRESET.whole) { dX -= 11 * Math.sin(pitch); dY += 11 * (Math.cos(pitch) - 1); }
+    target.y += (dY - target.y) * f;
+    if (goal === PRESET.whole) target.x += (dX - target.x) * f;
     placeCam();
     renderer.render(scene, camera);
     requestAnimationFrame(frame);
@@ -363,6 +376,5 @@
   requestAnimationFrame(frame);
 })();
 </script>
-
 </body>
 </html>
